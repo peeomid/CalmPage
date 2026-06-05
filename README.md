@@ -1,38 +1,39 @@
 # CalmPage
 
-CalmPage is a macOS app for reading Markdown files with less noise and more focus.
+CalmPage is a native macOS Markdown reader and viewer for local files, folders, tabs, workspaces, and focus reading.
 
 ![CalmPage app view](docs/app.png)
 
 ![CalmPage focus mode](docs/focus_mode.png)
 
-It is made for people who:
+It is made for people who want:
 
-- read notes, docs, or articles in local Markdown folders
-- want a clean reading view instead of an editor
-- like keyboard shortcuts
-- want fast search, tabs, workspaces, and a calm layout
+- a clean Markdown reader instead of a full editor
+- fast access to local Markdown folders and notes
+- tabs for opening multiple files at once
+- workspaces for grouping different folder sets
+- focus mode, table of contents, and keyboard shortcuts
 
 ## What CalmPage does
 
-- Opens one or many Markdown folders
-- Shows your files in a library view
-- Lets you open several files in tabs
-- Offers focus mode for distraction-free reading
-- Shows table of contents for long documents
-- Supports command palette search for files, tabs, headings, actions, settings, and workspaces
-- Lets you customize reading style, colors, spacing, and Markdown rendering
+- Open one or many Markdown folders
+- Browse Markdown files in a clean library view
+- Open several files in tabs
+- Use focus mode for distraction-free reading
+- Show a table of contents for long documents
+- Use the command palette to jump to files, tabs, headings, actions, settings, and workspaces
+- Customize reading style, colors, spacing, and Markdown rendering
 
 ## What CalmPage is for
 
-CalmPage is for reading, not writing.
+CalmPage is for reading Markdown, not writing it.
 
 Use it when you want:
 
 - quick access to a vault of Markdown notes
 - a simple way to jump between files
 - a better reading view for long documents
-- a desktop app that feels lighter than a full editor
+- a Markdown viewer that feels lighter than a full editor
 
 ## Quick Start
 
@@ -89,7 +90,7 @@ This is useful when you want to compare files or move back and forth without los
 
 ## Focus Mode
 
-Focus mode is for reading one article with fewer distractions.
+Focus mode is for reading one Markdown document with fewer distractions.
 
 It keeps the page quiet and lets you use:
 
@@ -108,7 +109,7 @@ CalmPage has a reading and rendering settings area where you can tune:
 - heading scale
 - Markdown element styling
 
-The goal is to let you shape the reading experience to match your own taste.
+The goal is to let you shape the Markdown reading experience to match your own taste.
 
 ## Supported files
 

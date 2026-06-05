@@ -1,7 +1,7 @@
 {
   "name": "calmpage",
   "version": "0.1.0",
-  "description": "",
+  "description": "CalmPage is a native macOS Markdown reader and viewer for local files, folders, tabs, workspaces, and focus reading.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
