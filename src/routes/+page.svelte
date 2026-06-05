@@ -366,6 +366,7 @@
   let hudOpen = $state(false);
   let railMode = $state<RailMode>("library");
   let rootMenu = $state<{ root: RootEntry; x: number; y: number } | null>(null);
+  let fileMenu = $state<{ file: FileEntry; x: number; y: number } | null>(null);
   let workspaceMenu = $state<{ workspace: WorkspaceEntry; x: number; y: number } | null>(null);
   let workspaces = $state<WorkspaceEntry[]>([]);
   let activeWorkspaceId = $state("default");
@@ -555,6 +556,7 @@
     { text: "Next Open Tab", shortcut: ["⌘", "]"], action: () => moveTab(1) },
     { text: "Previous Open Tab", shortcut: ["⌘", "["], action: () => moveTab(-1) },
     { text: "Close Current Tab", shortcut: ["⌘", "W"], action: closeActiveTab },
+    { text: "Close All Open Files", shortcut: [], action: closeAllOpenTabs },
     { text: "Search Open Tabs", shortcut: ["⌘", "O"], action: () => openPalette("tabs") },
     { text: "Find in Current Note", shortcut: ["⌘", "F"], action: openFind },
     { text: "Open Settings Studio", shortcut: ["⌘", ","], action: () => { settingsOpen = true; settingsSection = "appearance"; } },
@@ -1029,8 +1031,40 @@
     return parts[parts.length - 2] || "Workspace root";
   }
 
+  function fileFullPath(file: FileEntry) {
+    const root = roots.find((candidate) => candidate.id === file.rootId);
+    if (!root) return file.path;
+    return `${root.path.replace(/\/$/, "")}/${file.path.replace(/^\//, "")}`;
+  }
+
+  function fileRelativePath(file: FileEntry) {
+    return file.path;
+  }
+
+  function rootFullPath(root: RootEntry) {
+    return root.path;
+  }
+
+  function rootRelativePath(root: RootEntry) {
+    return root.name;
+  }
+
   function noteTabId(rootId: string, path: string) {
     return `${rootId}:${path}`;
+  }
+
+  function saveOpenTabsState(nextTabs = openTabs, nextActiveTabId = activeTabId) {
+    localStorage.setItem(
+      "minimal-reader:open-tabs",
+      JSON.stringify(
+        nextTabs.map((tab) => ({
+          rootId: tab.file.rootId,
+          path: tab.file.path,
+          scrollTop: tab.scrollTop,
+        })),
+      ),
+    );
+    localStorage.setItem("minimal-reader:active-tab", nextActiveTabId ?? "");
   }
 
   function currentReaderScrollTop() {
@@ -1063,6 +1097,7 @@
     findQuery = "";
     closeTocSearch();
     restoreTabScroll(tab);
+    saveOpenTabsState();
   }
 
   function upsertTab(file: FileEntry, note: RenderedNote, makeActive = true) {
@@ -1085,6 +1120,7 @@
         document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: scrollTop });
       }, 0);
     }
+    saveOpenTabsState();
   }
 
   function closeTab(tabId: string) {
@@ -1107,10 +1143,24 @@
       selectedRootId = null;
       selectedPath = null;
     }
+    saveOpenTabsState(nextTabs, nextTab?.id ?? null);
   }
 
   function closeActiveTab() {
     if (activeTabId) closeTab(activeTabId);
+  }
+
+  function closeAllOpenTabs() {
+    rememberActiveTabScroll();
+    openTabs = [];
+    activeTabId = null;
+    currentNote = null;
+    selectedRootId = null;
+    selectedPath = null;
+    findOpen = false;
+    findQuery = "";
+    closeTocSearch();
+    saveOpenTabsState([], null);
   }
 
   function moveTab(delta: number) {
@@ -1160,6 +1210,7 @@
       currentNote = null;
       activeTabId = null;
     }
+    saveOpenTabsState();
   }
 
   function collapseAllFolders(sourceFiles = files) {
@@ -1374,6 +1425,7 @@
     paletteOpen = true;
     paletteMode = mode;
     rootMenu = null;
+    fileMenu = null;
     workspaceMenu = null;
     paletteQuery = getPalettePrefix(mode);
     paletteActiveIndex = 0;
@@ -1394,8 +1446,20 @@
   function showRootMenu(event: MouseEvent, root: RootEntry) {
     event.preventDefault();
     workspaceMenu = null;
+    fileMenu = null;
     rootMenu = {
       root,
+      x: Math.min(event.clientX, window.innerWidth - 220),
+      y: Math.min(event.clientY, window.innerHeight - 150),
+    };
+  }
+
+  function showFileMenu(event: MouseEvent, file: FileEntry) {
+    event.preventDefault();
+    rootMenu = null;
+    workspaceMenu = null;
+    fileMenu = {
+      file,
       x: Math.min(event.clientX, window.innerWidth - 220),
       y: Math.min(event.clientY, window.innerHeight - 150),
     };
@@ -1404,6 +1468,7 @@
   function showWorkspaceMenu(event: MouseEvent, workspace: WorkspaceEntry) {
     event.preventDefault();
     rootMenu = null;
+    fileMenu = null;
     workspaceMenu = {
       workspace,
       x: Math.min(event.clientX, window.innerWidth - 230),
@@ -1415,6 +1480,7 @@
     railMode = "workspaces";
     sidebarCollapsed = false;
     rootMenu = null;
+    fileMenu = null;
     workspaceMenu = null;
   }
 
@@ -1422,11 +1488,13 @@
     railMode = "library";
     sidebarCollapsed = false;
     rootMenu = null;
+    fileMenu = null;
     workspaceMenu = null;
   }
 
   function handleWindowClick() {
     rootMenu = null;
+    fileMenu = null;
     workspaceMenu = null;
   }
 
@@ -1592,6 +1660,7 @@
       openTabs = openTabs.map((tab) =>
         tab.id === activeTabId ? { ...tab, scrollTop: nextScrollTop } : tab,
       );
+      saveOpenTabsState();
     }
     window.clearTimeout(readerScrollTimeout);
     readerScrollTimeout = window.setTimeout(() => {
@@ -1997,6 +2066,45 @@
     }, 3000);
   }
 
+  function snapshotFile(rootId: string, path: string) {
+    return files.find((file) => file.rootId === rootId && file.path === path) ?? null;
+  }
+
+  async function restoreOpenTabsFromStorage() {
+    const savedOpenTabs = safeJson<Array<{ rootId: string; path: string; scrollTop?: number }>>("minimal-reader:open-tabs", []);
+    const savedActiveTabId = localStorage.getItem("minimal-reader:active-tab") || null;
+    if (savedOpenTabs.length === 0) return;
+
+    openTabs = [];
+    activeTabId = null;
+    currentNote = null;
+    selectedRootId = null;
+    selectedPath = null;
+
+    for (const savedTab of savedOpenTabs) {
+      const file = snapshotFile(savedTab.rootId, savedTab.path);
+      if (!file) continue;
+      try {
+        const note = await invoke<RenderedNote>("render_note", { rootId: savedTab.rootId, path: savedTab.path });
+        upsertTab(file, note, false);
+        if (savedTab.scrollTop !== undefined) {
+          const tabId = noteTabId(file.rootId, file.path);
+          openTabs = openTabs.map((tab) => (tab.id === tabId ? { ...tab, scrollTop: savedTab.scrollTop ?? 0 } : tab));
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (savedActiveTabId && openTabs.some((tab) => tab.id === savedActiveTabId)) {
+      activateTab(savedActiveTabId);
+    } else if (openTabs.length > 0) {
+      activateTab(openTabs[0].id);
+    } else {
+      saveOpenTabsState([], null);
+    }
+  }
+
   onMount(() => {
     const savedTheme = localStorage.getItem("minimal-reader:theme") as "light" | "dark" | null;
     if (savedTheme) theme = savedTheme;
@@ -2030,6 +2138,7 @@
           applySnapshot(snapshot);
           collapseAllFolders(snapshot.files);
           normalizeWorkspaces(snapshot.roots);
+          return restoreOpenTabsFromStorage();
         })
         .catch((err) => {
           error = err instanceof Error ? err.message : String(err);
@@ -2492,6 +2601,7 @@
                 class:selected={row.file.rootId === selectedRootId && row.file.path === selectedPath}
                 class="file-row"
                 onclick={() => openNote(row.file)}
+                oncontextmenu={(event) => showFileMenu(event, row.file)}
                 title={row.file.path}
                 style={`padding-left: ${10 + row.depth * 14}px`}
               >
@@ -2528,10 +2638,37 @@
         Show in library
       </button>
       <button onclick={() => void navigator.clipboard.writeText(rootMenu?.root.path ?? "")}>
-        Copy folder path
+        Copy full path
+      </button>
+      <button onclick={() => void navigator.clipboard.writeText(rootMenu ? rootRelativePath(rootMenu.root) : "")}>
+        Copy relative path
       </button>
       <button class="danger" onclick={() => rootMenu && removeFolder(rootMenu.root)} disabled={isOpening}>
         Remove from Library
+      </button>
+    </div>
+  {/if}
+
+  {#if fileMenu}
+    <div
+      class="root-context-menu"
+      style={`left: ${fileMenu.x}px; top: ${fileMenu.y}px;`}
+      onclick={(event) => event.stopPropagation()}
+      onkeydown={(event) => {
+        if (event.key === "Escape") fileMenu = null;
+      }}
+      role="menu"
+      tabindex="-1"
+    >
+      <div class="root-context-title">
+        <strong>{fileMenu.file.title}</strong>
+        <small>{fileFullPath(fileMenu.file)}</small>
+      </div>
+      <button onclick={() => void navigator.clipboard.writeText(fileRelativePath(fileMenu!.file))}>
+        Copy relative path
+      </button>
+      <button onclick={() => void navigator.clipboard.writeText(fileMenu ? fileFullPath(fileMenu.file) : "")}>
+        Copy full path
       </button>
     </div>
   {/if}
