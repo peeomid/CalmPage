@@ -14,6 +14,8 @@ CalmPage is built to solve that gap:
 
 ![CalmPage app view](docs/app.png)
 
+![CalmPage command palette](docs/command_pallet.png)
+
 ![CalmPage focus mode](docs/focus_mode.png)
 
 It is made for people who want:
