@@ -2,7 +2,9 @@
 
 CalmPage is a macOS app for reading Markdown files with less noise and more focus.
 
-![CalmPage screenshot](docs/calmpage-screenshot.png)
+![CalmPage app view](docs/app.png)
+
+![CalmPage focus mode](docs/focus_mode.png)
 
 It is made for people who:
 
