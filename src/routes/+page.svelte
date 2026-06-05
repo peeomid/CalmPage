@@ -4425,6 +4425,54 @@ reader.apply(preset);</code></pre>
     background: var(--blockquote-bg, var(--accent-soft));
   }
 
+  .reader :global(.frontmatter) {
+    margin: 0 0 1.2em;
+    padding: 0.95em 1em;
+    border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--panel-strong) 72%, transparent);
+  }
+
+  .reader :global(.frontmatter-title) {
+    margin: 0 0 0.75em;
+    color: var(--muted);
+    font-size: 0.78em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+
+  .reader :global(.frontmatter-list) {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7em;
+    margin: 0;
+  }
+
+  .reader :global(.frontmatter-item) {
+    display: flex;
+    flex-direction: column;
+    gap: 0.18em;
+    margin: 0;
+  }
+
+  .reader :global(.frontmatter-item dt) {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.78em;
+    font-weight: 650;
+    text-transform: none;
+    letter-spacing: 0.02em;
+  }
+
+  .reader :global(.frontmatter-item dd) {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.96em;
+    line-height: 1.45;
+    word-break: break-word;
+  }
+
   .reader :global(mark) {
     border-radius: 0.25em;
     background: var(--highlight);

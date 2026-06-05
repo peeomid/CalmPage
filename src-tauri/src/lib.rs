@@ -749,7 +749,7 @@ mod tests {
         assert!(html.contains("status"));
         assert!(html.contains("draft"));
         assert!(html.contains("markdown, reader"));
-        assert!(!html.contains("Ignore this heading"));
+        assert!(html.contains("<h1>Ignore this heading</h1>"));
     }
 
     #[test]
