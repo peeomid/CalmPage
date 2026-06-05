@@ -33,8 +33,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/release/bundle/macos/Minimal Markdown Reader.app
-            src-tauri/target/release/bundle/dmg/Minimal Markdown Reader_0.1.0_aarch64.dmg
+            src-tauri/target/release/bundle/macos/CalmPage.app
+            src-tauri/target/release/bundle/dmg/CalmPage_0.1.0_aarch64.dmg
           body_path: docs/releases/v0.1.0.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
