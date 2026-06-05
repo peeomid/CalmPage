@@ -1,6 +1,7 @@
 use notify::{recommended_watcher, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use pulldown_cmark::{html, Options, Parser};
 use serde::Serialize;
+use serde_yaml::Value as YamlValue;
 use std::{
     collections::HashMap,
     fs,
@@ -215,7 +216,65 @@ fn snapshot(state: &VaultState) -> VaultSnapshot {
     }
 }
 
+fn split_frontmatter(markdown: &str) -> (Option<String>, &str) {
+    let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
+    let Some(rest) = markdown.strip_prefix("---\n").or_else(|| markdown.strip_prefix("---\r\n")) else {
+        return (None, markdown);
+    };
+    if let Some(end) = rest.find("\n---\n") {
+        let yaml = &rest[..end];
+        let body = &rest[end + 5..];
+        return (Some(yaml.to_string()), body.trim_start_matches(['\n', '\r']));
+    }
+    if let Some(end) = rest.find("\r\n---\r\n") {
+        let yaml = &rest[..end];
+        let body = &rest[end + 7..];
+        return (Some(yaml.to_string()), body.trim_start_matches(['\n', '\r']));
+    }
+    (None, markdown)
+}
+
+fn render_frontmatter(frontmatter: &YamlValue) -> String {
+    let Some(map) = frontmatter.as_mapping() else {
+        return String::new();
+    };
+    if map.is_empty() {
+        return String::new();
+    }
+    let mut html = String::from("<section class=\"frontmatter\"><div class=\"frontmatter-title\">Document details</div><dl class=\"frontmatter-list\">");
+    for (key, value) in map {
+        let key = key.as_str().unwrap_or("field");
+        let value = match value {
+            YamlValue::String(text) => text.clone(),
+            YamlValue::Number(num) => num.to_string(),
+            YamlValue::Bool(flag) => flag.to_string(),
+            YamlValue::Sequence(items) => items
+                .iter()
+                .map(|item| match item {
+                    YamlValue::String(text) => text.clone(),
+                    YamlValue::Number(num) => num.to_string(),
+                    YamlValue::Bool(flag) => flag.to_string(),
+                    other => other.as_str().unwrap_or("").to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            other => other.as_str().unwrap_or("").to_string(),
+        };
+        if value.is_empty() {
+            continue;
+        }
+        html.push_str("<div class=\"frontmatter-item\"><dt>");
+        html.push_str(&html_escape::encode_text(key));
+        html.push_str("</dt><dd>");
+        html.push_str(&html_escape::encode_text(&value));
+        html.push_str("</dd></div>");
+    }
+    html.push_str("</dl></section>");
+    html
+}
+
 fn render_markdown(markdown: &str) -> String {
+    let (frontmatter, body_markdown) = split_frontmatter(markdown);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
@@ -223,14 +282,47 @@ fn render_markdown(markdown: &str) -> String {
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
 
-    let parser = Parser::new_ext(markdown, options);
+    let parser = Parser::new_ext(body_markdown, options);
     let mut body = String::new();
     html::push_html(&mut body, parser);
+    let frontmatter_html = frontmatter
+        .and_then(|yaml| serde_yaml::from_str::<YamlValue>(&yaml).ok())
+        .map(|value| render_frontmatter(&value))
+        .unwrap_or_default();
+    let combined = if frontmatter_html.is_empty() {
+        body
+    } else {
+        format!("{frontmatter_html}{body}")
+    };
     ammonia::Builder::default()
         .add_tags(["input"])
+        .add_tags(["section", "dl", "dt", "dd"])
         .add_generic_attributes(["class", "checked", "disabled"])
-        .clean(&body)
+        .clean(&combined)
         .to_string()
+}
+
+fn note_title(markdown: &str, note_path: &str) -> String {
+    let (frontmatter, body_markdown) = split_frontmatter(markdown);
+    if let Some(yaml) = frontmatter
+        .and_then(|yaml| serde_yaml::from_str::<YamlValue>(&yaml).ok())
+        .and_then(|value| value.as_mapping().cloned())
+    {
+        if let Some(title) = yaml
+            .get(&YamlValue::String("title".to_string()))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            return title.to_string();
+        }
+    }
+    body_markdown
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| title_from_path(note_path))
 }
 
 fn abs_note_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
@@ -477,12 +569,7 @@ async fn render_note(state: State<'_, AppState>, root_id: String, path: String) 
         let note_path = path.clone();
         tauri::async_runtime::spawn_blocking(move || -> Result<RenderedNote, String> {
             let markdown = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
-            let title = markdown
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
-                .filter(|title| !title.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| title_from_path(&note_path));
+            let title = note_title(&markdown, &note_path);
             Ok(RenderedNote {
                 path: note_path,
                 title,
@@ -650,6 +737,19 @@ mod tests {
         assert!(html.contains("<strong>bold</strong>"));
         assert!(!html.contains("<script>"));
         assert!(!html.contains("alert"));
+    }
+
+    #[test]
+    fn renderer_turns_frontmatter_into_metadata_block() {
+        let markdown = "---\ntitle: CalmPage\nstatus: draft\ntags:\n  - markdown\n  - reader\n---\n# Ignore this heading\n\nBody text.";
+        let html = render_markdown(markdown);
+
+        assert!(html.contains("Document details"));
+        assert!(html.contains("CalmPage"));
+        assert!(html.contains("status"));
+        assert!(html.contains("draft"));
+        assert!(html.contains("markdown, reader"));
+        assert!(!html.contains("Ignore this heading"));
     }
 
     #[test]
