@@ -1,0 +1,1148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minimal Markdown Reader - Combined UI Prototype</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,650;9..144,760&family=Literata:opsz,wght@7..72,400;7..72,500;7..72,700&family=Newsreader:opsz,wght@6..72,400;6..72,600;6..72,700&family=Outfit:wght@500;600;700;800&display=swap");
+
+    :root {
+      --bg: #d9d2c2;
+      --shell: rgba(250, 247, 239, 0.88);
+      --paper: #fbf7ed;
+      --paper-soft: rgba(251, 247, 237, 0.72);
+      --ink: #211c18;
+      --muted: #81776c;
+      --faint: #cfc4b4;
+      --line: rgba(71, 58, 42, 0.14);
+      --accent: #a96f3b;
+      --accent-strong: #7d461f;
+      --accent-soft: rgba(169, 111, 59, 0.16);
+      --blue: #356cbe;
+      --green: #5f8f63;
+      --danger: #b94a3b;
+      --shadow: 0 30px 90px rgba(46, 34, 23, 0.22);
+      --glass: rgba(255, 252, 243, 0.22);
+      --glass-strong: rgba(255, 252, 243, 0.56);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 12%, rgba(255, 255, 255, 0.86), transparent 28%),
+        radial-gradient(circle at 82% 10%, rgba(206, 160, 105, 0.22), transparent 28%),
+        linear-gradient(135deg, #c9c0ae 0%, #efe7d8 52%, #cfc5b6 100%);
+      font-family: Outfit, ui-sans-serif, system-ui, sans-serif;
+      overflow: hidden;
+    }
+
+    .background-art {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.28;
+      background:
+        linear-gradient(140deg, transparent 0 64%, rgba(71, 82, 70, 0.2) 64% 100%),
+        radial-gradient(ellipse at 94% 72%, rgba(72, 92, 77, 0.38), transparent 24%);
+      filter: blur(1px);
+    }
+
+    .app-window {
+      position: relative;
+      width: min(1480px, calc(100vw - 44px));
+      height: min(920px, calc(100vh - 44px));
+      margin: 22px auto;
+      display: grid;
+      grid-template-columns: 56px 260px minmax(0, 1fr);
+      grid-template-rows: 58px minmax(0, 1fr);
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      border-radius: 24px;
+      background: var(--shell);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(26px) saturate(1.1);
+      animation: rise 600ms cubic-bezier(.2, .9, .22, 1) both;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(16px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .traffic {
+      grid-column: 1 / 3;
+      grid-row: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-left: 20px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 252, 245, 0.42);
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+    }
+
+    .dot.red { background: #ef6a5f; }
+    .dot.yellow { background: #f2bd4f; }
+    .dot.green { background: #62c45f; }
+
+    .topbar {
+      grid-column: 3;
+      grid-row: 1;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 16px 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 252, 245, 0.52);
+    }
+
+    .icon-button,
+    .ghost-button,
+    .tab-scroll {
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: rgba(255, 252, 245, 0.68);
+      cursor: pointer;
+      font: inherit;
+      transition: 160ms ease;
+    }
+
+    .icon-button:hover,
+    .ghost-button:hover,
+    .tab-scroll:hover {
+      color: var(--ink);
+      border-color: rgba(169, 111, 59, 0.5);
+      background: rgba(255, 252, 245, 0.92);
+    }
+
+    .icon-button {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      font-size: 17px;
+    }
+
+    .tab-shell {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr) 30px;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .tab-scroll {
+      height: 30px;
+      border-radius: 999px;
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .tabs {
+      min-width: 0;
+      display: flex;
+      gap: 6px;
+      overflow: hidden;
+      padding: 5px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(244, 238, 228, 0.58);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    }
+
+    .tab {
+      flex: 0 0 188px;
+      min-width: 188px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 11px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .tab.active {
+      color: var(--ink);
+      background: rgba(255, 252, 245, 0.94);
+      border-color: rgba(169, 111, 59, 0.34);
+      box-shadow: 0 8px 24px rgba(87, 58, 32, 0.10);
+    }
+
+    .tab-number {
+      width: 19px;
+      height: 19px;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      color: #fff9ec;
+      background: var(--accent);
+      font-size: 10px;
+    }
+
+    .tab-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tab-close {
+      margin-left: auto;
+      opacity: 0.58;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .top-actions.minimal {
+      width: 44px;
+      justify-content: flex-end;
+    }
+
+    .ghost-button {
+      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      border-radius: 14px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .kbd {
+      padding: 2px 5px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.62);
+      font-size: 10px;
+    }
+
+    .rail {
+      grid-column: 1;
+      grid-row: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 8px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 252, 245, 0.34);
+    }
+
+    .rail .brand {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 11px;
+      color: #fff7ec;
+      background: #24211d;
+      font-family: Fraunces, serif;
+      font-weight: 760;
+      margin-bottom: 12px;
+    }
+
+    .rail-button {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 12px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    .rail-button.active {
+      color: var(--accent-strong);
+      background: var(--accent-soft);
+    }
+
+    .sidebar {
+      grid-column: 2;
+      grid-row: 2;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 22px 16px 16px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 252, 245, 0.48);
+    }
+
+    .side-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .file-tree {
+      display: grid;
+      gap: 6px;
+      font-size: 13px;
+    }
+
+    .folder,
+    .file {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 10px;
+      border-radius: 12px;
+      color: var(--muted);
+    }
+
+    .folder {
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .file.active {
+      color: var(--accent-strong);
+      background: rgba(169, 111, 59, 0.12);
+    }
+
+    .side-search {
+      margin-top: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      color: var(--muted);
+      background: rgba(255, 252, 245, 0.58);
+      font-size: 12px;
+    }
+
+    .workspace {
+      position: relative;
+      grid-column: 3;
+      grid-row: 2;
+      min-width: 0;
+      overflow: hidden;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,0.18), transparent 34%, rgba(255,255,255,0.22)),
+        var(--paper);
+    }
+
+    .reader-scroll {
+      height: 100%;
+      overflow: auto;
+      padding: 70px 380px 110px 88px;
+      scrollbar-width: none;
+    }
+
+    .reader-scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    .article {
+      max-width: 720px;
+      font-family: Literata, Georgia, serif;
+      color: var(--ink);
+      animation: fadeUp 700ms 120ms both;
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .article .eyebrow {
+      font-family: Outfit, sans-serif;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .article h1 {
+      margin: 16px 0 24px;
+      font-family: Fraunces, Georgia, serif;
+      font-size: clamp(56px, 6vw, 86px);
+      line-height: 0.94;
+      letter-spacing: -0.06em;
+    }
+
+    .article h2 {
+      margin: 54px 0 12px;
+      font-family: Fraunces, Georgia, serif;
+      font-size: 30px;
+      letter-spacing: -0.035em;
+    }
+
+    .article p,
+    .article li {
+      font-size: 18px;
+      line-height: 1.82;
+    }
+
+    .article p {
+      margin: 0 0 18px;
+    }
+
+    .quote {
+      margin: 28px 0 34px;
+      padding: 18px 22px;
+      border-left: 3px solid var(--accent);
+      color: #4e4034;
+      background: linear-gradient(90deg, rgba(169, 111, 59, 0.12), transparent);
+      font-style: italic;
+    }
+
+    .code-card {
+      margin: 20px 0;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      color: #313b31;
+      background: #f1ece1;
+      font-family: "SFMono-Regular", ui-monospace, monospace;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .toc {
+      position: absolute;
+      top: 54px;
+      right: 42px;
+      width: 300px;
+      max-height: calc(100% - 108px);
+      padding: 16px;
+      overflow: hidden;
+      border: 1px solid rgba(80, 64, 43, 0.16);
+      border-radius: 22px;
+      background: rgba(255, 252, 245, 0.18);
+      backdrop-filter: blur(22px) saturate(1.35) contrast(1.08);
+      box-shadow: 0 24px 70px rgba(44, 32, 22, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.52);
+      animation: floatIn 700ms 220ms both;
+    }
+
+    @keyframes floatIn {
+      from { opacity: 0; transform: translateX(16px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    .toc-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+      color: rgba(33, 28, 24, 0.72);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      text-shadow: 0 1px 10px var(--paper);
+    }
+
+    .toc-list {
+      display: grid;
+      gap: 5px;
+    }
+
+    .toc-item {
+      display: grid;
+      grid-template-columns: 24px 1fr;
+      gap: 8px;
+      padding: 8px 10px;
+      border-left: 2px solid transparent;
+      border-radius: 11px;
+      color: rgba(33, 28, 24, 0.78);
+      font-size: 13px;
+      font-weight: 700;
+      text-shadow: 0 1px 9px var(--paper), 0 0 1px rgba(255,255,255,0.78);
+    }
+
+    .toc-item.active {
+      color: var(--ink);
+      border-left-color: var(--accent);
+      background: rgba(169, 111, 59, 0.16);
+      box-shadow: inset 0 0 0 1px rgba(169, 111, 59, 0.14);
+    }
+
+    .command-palette {
+      position: absolute;
+      left: 22px;
+      bottom: 22px;
+      width: 470px;
+      overflow: hidden;
+      border: 1px solid rgba(80, 64, 43, 0.16);
+      border-radius: 20px;
+      background: rgba(255, 252, 245, 0.66);
+      backdrop-filter: blur(24px);
+      box-shadow: 0 24px 80px rgba(52, 35, 20, 0.18);
+    }
+
+    .palette-input {
+      display: flex;
+      justify-content: space-between;
+      padding: 15px 18px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .palette-list {
+      padding: 8px;
+      display: grid;
+      gap: 3px;
+      font-size: 13px;
+    }
+
+    .palette-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 9px 11px;
+      border-radius: 12px;
+      color: var(--muted);
+    }
+
+    .palette-row.active {
+      color: var(--ink);
+      background: rgba(169, 111, 59, 0.12);
+    }
+
+    .settings-studio {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 430px;
+      gap: 0;
+      background: rgba(250, 248, 242, 0.96);
+      transform: translateX(100%);
+      opacity: 0;
+      transition: 360ms cubic-bezier(.2, .9, .22, 1);
+      z-index: 12;
+    }
+
+    .settings-studio.open {
+      transform: translateX(0);
+      opacity: 1;
+    }
+
+    .settings-main {
+      padding: 26px;
+      overflow: auto;
+    }
+
+    .settings-layout {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .settings-nav {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .settings-nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 12px;
+      border: 1px solid transparent;
+      border-radius: 14px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .settings-nav-item.active {
+      color: var(--accent-strong);
+      border-color: rgba(169, 111, 59, 0.20);
+      background: var(--accent-soft);
+    }
+
+    .settings-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .settings-top h2 {
+      margin: 0;
+      font-size: 25px;
+      letter-spacing: -0.03em;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .preset-browser {
+      display: grid;
+      gap: 12px;
+    }
+
+    .preset-list {
+      display: flex;
+      gap: 8px;
+      overflow: hidden;
+    }
+
+    .preset-item {
+      flex: 0 0 154px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.38);
+    }
+
+    .preset-item.active {
+      border-color: rgba(169, 111, 59, 0.38);
+      background: var(--accent-soft);
+    }
+
+    .preset-name {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 4px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .preset-meta {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .system-badge {
+      padding: 2px 6px;
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.58);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .preset-detail {
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 252, 245, 0.62);
+    }
+
+    .preset-code {
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      color: #3e342a;
+      background: rgba(241, 236, 225, 0.86);
+      font-family: "SFMono-Regular", ui-monospace, monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      max-height: 130px;
+      overflow: auto;
+    }
+
+    .setting-card {
+      min-height: 156px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 252, 245, 0.62);
+      box-shadow: 0 12px 28px rgba(72, 54, 33, 0.05);
+    }
+
+    .setting-card.wide {
+      grid-column: 1 / -1;
+      min-height: 112px;
+    }
+
+    .setting-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    .control-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 12px;
+      margin: 10px 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .fake-input,
+    .fake-select {
+      min-width: 92px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.58);
+      text-align: right;
+    }
+
+    .slider {
+      height: 4px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent) 0 58%, rgba(33, 28, 24, 0.14) 58%);
+    }
+
+    .swatches {
+      display: flex;
+      gap: 9px;
+      flex-wrap: wrap;
+    }
+
+    .swatch {
+      width: 26px;
+      height: 26px;
+      border: 2px solid rgba(255, 255, 255, 0.8);
+      border-radius: 999px;
+      box-shadow: 0 0 0 1px var(--line);
+    }
+
+    .toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .toggle-pill {
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255,255,255,0.46);
+      font-size: 12px;
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .toggle-pill.on {
+      color: var(--accent-strong);
+      background: var(--accent-soft);
+      border-color: rgba(169, 111, 59, 0.28);
+    }
+
+    .preset-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .preset-actions button {
+      min-width: 120px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255,255,255,0.54);
+      color: var(--ink);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .preset-actions .primary {
+      color: #fff8ef;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .preview-pane {
+      overflow: auto;
+      padding: 30px;
+      border-left: 1px solid var(--line);
+      background: #fbf8ef;
+    }
+
+    .preview-card {
+      max-width: 340px;
+      font-family: Newsreader, Georgia, serif;
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    .preview-card h1 {
+      font-family: Fraunces, serif;
+      font-size: 40px;
+      line-height: 1;
+      letter-spacing: -0.05em;
+    }
+
+    .floating-actions {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      display: flex;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      z-index: 8;
+    }
+
+    .mode-chip {
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 252, 245, 0.62);
+      backdrop-filter: blur(14px);
+    }
+
+    body.settings-mode .settings-studio {
+      transform: translateX(0);
+      opacity: 1;
+    }
+
+    @media (max-width: 1000px) {
+      body {
+        overflow: auto;
+      }
+
+      .app-window {
+        height: auto;
+        min-height: calc(100vh - 28px);
+        margin: 14px;
+        width: calc(100vw - 28px);
+        grid-template-columns: 48px minmax(0, 1fr);
+        grid-template-rows: 58px auto minmax(0, 1fr);
+      }
+
+      .traffic {
+        grid-column: 1 / 3;
+      }
+
+      .topbar {
+        grid-column: 1 / 3;
+        grid-row: 2;
+      }
+
+      .rail {
+        display: none;
+      }
+
+      .sidebar {
+        display: none;
+      }
+
+      .workspace {
+        grid-column: 1 / 3;
+        grid-row: 3;
+        min-height: 780px;
+      }
+
+      .reader-scroll {
+        padding: 42px 24px 130px;
+      }
+
+      .toc {
+        display: none;
+      }
+
+      .settings-studio {
+        grid-template-columns: 1fr;
+      }
+
+      .preview-pane {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="background-art"></div>
+  <div class="app-window">
+    <div class="traffic">
+      <span class="dot red"></span>
+      <span class="dot yellow"></span>
+      <span class="dot green"></span>
+    </div>
+
+    <header class="topbar">
+      <button class="icon-button" title="Toggle sidebar">☰</button>
+      <div class="tab-shell">
+        <button class="tab-scroll">‹</button>
+        <nav class="tabs" aria-label="Open markdown files">
+          <div class="tab active"><span class="tab-number">1</span><span class="tab-title">Design Philosophy.md</span><span class="tab-close">×</span></div>
+          <div class="tab"><span class="tab-number">2</span><span class="tab-title">Writing is Thinking.md</span><span class="tab-close">×</span></div>
+          <div class="tab"><span class="tab-number">3</span><span class="tab-title">Settings System.md</span><span class="tab-close">×</span></div>
+          <div class="tab"><span class="tab-number">4</span><span class="tab-title">Reader Presets.md</span><span class="tab-close">×</span></div>
+          <div class="tab"><span class="tab-number">5</span><span class="tab-title">Markdown Rendering.md</span><span class="tab-close">×</span></div>
+        </nav>
+        <button class="tab-scroll">›</button>
+      </div>
+      <div class="top-actions minimal">
+        <button class="icon-button" title="More">⋯</button>
+      </div>
+    </header>
+
+    <nav class="rail">
+      <div class="brand">M</div>
+      <button class="rail-button active">📚</button>
+      <button class="rail-button">🔎</button>
+      <button class="rail-button">⌘</button>
+      <button class="rail-button" onclick="document.body.classList.toggle('settings-mode')">⚙</button>
+    </nav>
+
+    <aside class="sidebar">
+      <div class="side-header">
+        <span>Files</span>
+        <span>＋</span>
+      </div>
+      <div class="file-tree">
+        <div class="folder">▾ Essays</div>
+        <div class="file active">📄 Design Philosophy.md</div>
+        <div class="file">📄 Writing is Thinking.md</div>
+        <div class="file">📄 Reader Presets.md</div>
+        <div class="folder">▸ Product</div>
+        <div class="folder">▸ Research</div>
+        <div class="folder">▸ Archive</div>
+      </div>
+      <div class="side-search">⌕ Filter files... <span style="margin-left:auto">⌘⇧F</span></div>
+    </aside>
+
+    <main class="workspace">
+      <div class="reader-scroll">
+        <article class="article">
+          <div class="eyebrow">Essays</div>
+          <h1>Design Philosophy</h1>
+          <div class="quote">
+            Good design is not just what it looks like and feels like. Good design is how it works.
+            <br>— Steve Jobs
+          </div>
+          <p>Design is not decoration. It is a decision about clarity, hierarchy, function, and respect for the reader's time.</p>
+          <h2>1. Clarity is Kindness</h2>
+          <p>Clarity removes friction. It helps people understand, act, and decide with confidence. In a reader app, the content should always win.</p>
+          <h2>2. Settings Are Creative Tools</h2>
+          <p>A theme should not be limited to light and dark. Users should be able to shape typography, spacing, code blocks, tables, tabs, and chrome into a preset they can save.</p>
+          <div class="code-card">theme.reader.background = "#fbf7ed"<br>markdown.heading.scale = 1.28<br>ui.tabs.style = "fixed-scroll"</div>
+          <h2>3. Keyboard First</h2>
+          <p>The command palette should be the fastest path to files, open tabs, headings, settings, and presets.</p>
+        </article>
+      </div>
+
+      <aside class="toc">
+        <div class="toc-head"><span>Table of Contents</span><span>×</span></div>
+        <div class="toc-list">
+          <div class="toc-item active"><span>1</span><span>Clarity is Kindness</span></div>
+          <div class="toc-item"><span>2</span><span>Settings Are Creative Tools</span></div>
+          <div class="toc-item"><span>3</span><span>Keyboard First</span></div>
+          <div class="toc-item"><span>4</span><span>Tabs Should Not Shrink</span></div>
+          <div class="toc-item"><span>5</span><span>Presets Are Portable</span></div>
+        </div>
+      </aside>
+
+      <section class="command-palette">
+        <div class="palette-input"><span>Search files, open tabs, commands, settings...</span><span>⌘K</span></div>
+        <div class="palette-list">
+          <div class="palette-row active"><span>📄 Design Philosophy.md</span><span>⌘1</span></div>
+          <div class="palette-row"><span>⚙ Open Settings Studio</span><span>⌘,</span></div>
+          <div class="palette-row"><span>🧭 Search headings</span><span>/</span></div>
+        </div>
+      </section>
+
+      <div class="floating-actions">
+        <span class="mode-chip">Aa</span>
+        <span class="mode-chip">Focus ⌘.</span>
+        <span class="mode-chip">TOC ⌘J</span>
+      </div>
+
+      <section class="settings-studio">
+        <div class="settings-main">
+          <div class="settings-top">
+            <div>
+              <h2>Settings Studio</h2>
+              <div style="color: var(--muted); font-size: 13px; margin-top: 4px;">App settings live here. Theme presets are one section, not the whole settings system.</div>
+            </div>
+            <button class="ghost-button" onclick="document.body.classList.remove('settings-mode')">Close</button>
+          </div>
+
+          <div class="settings-layout">
+            <nav class="settings-nav">
+              <div class="settings-nav-item">⚙ General</div>
+              <div class="settings-nav-item">⌨ Shortcuts</div>
+              <div class="settings-nav-item">📁 Files</div>
+              <div class="settings-nav-item active">🎨 Appearance</div>
+              <div class="settings-nav-item">🧭 Table of Contents</div>
+              <div class="settings-nav-item">🧩 Markdown</div>
+              <div class="settings-nav-item">🔌 Advanced</div>
+            </nav>
+
+            <div>
+              <div class="setting-card wide" style="margin-bottom:14px;">
+                <div class="setting-title">Theme Presets</div>
+                <div class="preset-browser">
+                  <div class="preset-list">
+                    <div class="preset-item active">
+                      <div class="preset-name">Warm Editorial <span class="system-badge">System</span></div>
+                      <div class="preset-meta">Paper, Fraunces, Literata</div>
+                    </div>
+                    <div class="preset-item">
+                      <div class="preset-name">Graphite Study <span class="system-badge">System</span></div>
+                      <div class="preset-meta">Dark, compact, high contrast</div>
+                    </div>
+                    <div class="preset-item">
+                      <div class="preset-name">Polar Notes <span class="system-badge">System</span></div>
+                      <div class="preset-meta">Cool, bright, spacious</div>
+                    </div>
+                    <div class="preset-item">
+                      <div class="preset-name">Luan Custom</div>
+                      <div class="preset-meta">User preset, editable</div>
+                    </div>
+                  </div>
+                  <div class="preset-detail">
+                    <div class="setting-title">Warm Editorial</div>
+                    <div style="color:var(--muted);font-size:12px;font-weight:700;">System presets are read-only. You can view settings, copy JSON, or duplicate into a custom preset.</div>
+                    <div class="preset-code">{
+  "name": "Warm Editorial",
+  "locked": true,
+  "typography": {
+    "body": "Literata",
+    "heading": "Fraunces",
+    "lineHeight": 1.82
+  },
+  "colors": {
+    "reader": "#fbf7ed",
+    "text": "#211c18",
+    "accent": "#a96f3b"
+  },
+  "ui": {
+    "tocGlassOpacity": 0.18,
+    "tabWidth": 188
+  }
+}</div>
+                    <div class="preset-actions" style="margin-top:12px;">
+                      <button class="primary">Use Preset</button>
+                      <button>Duplicate</button>
+                      <button>Copy JSON</button>
+                      <button>Export</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-grid">
+                <div class="setting-card">
+                  <div class="setting-title">Tt Typography</div>
+                  <div class="control-row"><span>Body font</span><span class="fake-select">Literata</span></div>
+                  <div class="control-row"><span>Heading font</span><span class="fake-select">Fraunces</span></div>
+                  <div class="control-row"><span>Line height</span><span class="fake-input">1.82</span></div>
+                </div>
+
+                <div class="setting-card">
+                  <div class="setting-title">🎨 Theme Colors</div>
+                  <div class="swatches">
+                    <span class="swatch" style="background:#211c18"></span>
+                    <span class="swatch" style="background:#fbf7ed"></span>
+                    <span class="swatch" style="background:#a96f3b"></span>
+                    <span class="swatch" style="background:#356cbe"></span>
+                    <span class="swatch" style="background:#5f8f63"></span>
+                    <span class="swatch" style="background:#b94a3b"></span>
+                  </div>
+                  <div class="control-row"><span>Background opacity</span><span class="fake-input">88%</span></div>
+                </div>
+
+                <div class="setting-card">
+                  <div class="setting-title">↕ Spacing</div>
+                  <div class="control-row"><span>Paragraph spacing</span><span class="fake-input">1.08em</span></div>
+                  <div class="slider"></div>
+                  <div class="control-row"><span>Reader width</span><span class="fake-input">720px</span></div>
+                </div>
+
+                <div class="setting-card">
+                  <div class="setting-title">Markdown Elements</div>
+                  <div class="toggle-grid">
+                    <span class="toggle-pill on">Headings</span>
+                    <span class="toggle-pill on">Lists</span>
+                    <span class="toggle-pill on">Quotes</span>
+                    <span class="toggle-pill on">Tables</span>
+                    <span class="toggle-pill on">Code</span>
+                    <span class="toggle-pill">Footnotes</span>
+                  </div>
+                </div>
+
+                <div class="setting-card">
+                  <div class="setting-title">Code Blocks</div>
+                  <div class="control-row"><span>Theme</span><span class="fake-select">Warm Linen</span></div>
+                  <div class="control-row"><span>Radius</span><span class="fake-input">18px</span></div>
+                  <div class="control-row"><span>Line numbers</span><span class="fake-select">On</span></div>
+                </div>
+
+                <div class="setting-card">
+                  <div class="setting-title">TOC & Tabs</div>
+                  <div class="control-row"><span>TOC glass opacity</span><span class="fake-input">18%</span></div>
+                  <div class="control-row"><span>Tab width</span><span class="fake-input">188px</span></div>
+                  <div class="control-row"><span>Open tabs search</span><span class="fake-select">open</span></div>
+                </div>
+
+                <div class="setting-card wide">
+                  <div class="setting-title">Create Custom Preset</div>
+                  <div style="color:var(--muted);font-size:12px;font-weight:700;margin-bottom:12px;">Saving creates a user preset in the list above. System presets stay locked.</div>
+                  <div class="preset-actions">
+                    <button class="primary">Save as New Preset</button>
+                    <button>Update Custom Preset</button>
+                    <button>Import JSON</button>
+                    <button>Reset Changes</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="preview-pane">
+          <div class="preview-card">
+            <div style="font-family: Outfit; color: var(--muted); font-size: 12px; font-weight: 800;">LIVE PREVIEW</div>
+            <h1>Markdown Preview</h1>
+            <p>Every setting updates this preview. Typography, color, spacing, code, tables, tabs, and the interface itself can become part of a saved preset.</p>
+            <div class="quote">A preset is a portable reading environment.</div>
+            <div class="code-card">preset.save("Warm Editorial")</div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

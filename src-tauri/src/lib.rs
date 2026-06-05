@@ -92,7 +92,7 @@ struct OpenedMarkdown {
 fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdx"))
         .unwrap_or(false)
 }
 
@@ -140,7 +140,7 @@ fn root_id(path: &Path) -> String {
 fn scan_markdown_files(root: &VaultRoot) -> Vec<FileEntry> {
     let mut files = Vec::new();
     for entry in WalkDir::new(&root.path)
-        .max_depth(12)
+        .max_depth(64)
         .into_iter()
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
@@ -255,6 +255,26 @@ fn sort_files(files: &mut [FileEntry]) {
     });
 }
 
+fn rebuild_watcher(app: AppHandle, roots: &[VaultRoot]) -> Result<(), String> {
+    let app_for_watcher = app.clone();
+    let mut watcher = recommended_watcher(move |result: notify::Result<notify::Event>| {
+        if let Ok(event) = result {
+            if event.paths.iter().any(|path| is_markdown(path)) {
+                schedule_refresh(app_for_watcher.clone(), event);
+            }
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    for root in roots {
+        watcher
+            .watch(&root.path, RecursiveMode::Recursive)
+            .map_err(|e| e.to_string())?;
+    }
+    let state = app.state::<AppState>();
+    *state.watcher.lock().expect("watcher mutex") = Some(watcher);
+    Ok(())
+}
+
 fn refresh_vault(app: &AppHandle, state: &AppState) {
     let maybe_snapshot = {
         let mut vault = state.vault.lock().expect("vault mutex");
@@ -362,24 +382,35 @@ async fn open_vaults(app: AppHandle, state: State<'_, AppState>, paths: Vec<Stri
     }
     state.render_cache.lock().expect("render cache mutex").clear();
 
-    let app_for_watcher = app.clone();
-    let mut watcher = recommended_watcher(move |result: notify::Result<notify::Event>| {
-        if let Ok(event) = result {
-            if event.paths.iter().any(|path| is_markdown(path)) {
-                schedule_refresh(app_for_watcher.clone(), event);
-            }
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    for root in &roots {
-        watcher
-            .watch(&root.path, RecursiveMode::Recursive)
-            .map_err(|e| e.to_string())?;
-    }
-    *state.watcher.lock().expect("watcher mutex") = Some(watcher);
+    rebuild_watcher(app, &roots)?;
 
     let vault = state.vault.lock().expect("vault mutex");
     Ok(snapshot(&vault))
+}
+
+#[tauri::command]
+async fn remove_vault(app: AppHandle, state: State<'_, AppState>, root_id: String) -> Result<VaultSnapshot, String> {
+    let roots = {
+        let vault = state.vault.lock().expect("vault mutex");
+        vault
+            .roots
+            .iter()
+            .filter(|root| root.id != root_id)
+            .map(|root| root.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    if roots.is_empty() {
+        {
+            let mut vault = state.vault.lock().expect("vault mutex");
+            vault.roots.clear();
+            vault.files.clear();
+        }
+        state.render_cache.lock().expect("render cache mutex").clear();
+        *state.watcher.lock().expect("watcher mutex") = None;
+        let vault = state.vault.lock().expect("vault mutex");
+        return Ok(snapshot(&vault));
+    }
+    open_vaults(app, state, roots).await
 }
 
 #[tauri::command]
@@ -492,38 +523,35 @@ async fn open_markdown_file(app: AppHandle, state: State<'_, AppState>, path: St
         .parent()
         .ok_or("Markdown file has no parent folder")?
         .to_path_buf();
+    let root_id = root_id(&root_path);
     let root = VaultRoot {
-        id: root_id(&root_path),
+        id: root_id.clone(),
         name: root_name(&root_path),
         path: root_path.clone(),
     };
     let relative_path = rel_path(&root_path, &canonical_file).ok_or("Could not resolve Markdown file path")?;
-    let files = {
-        let scan_root = root.clone();
-        tauri::async_runtime::spawn_blocking(move || scan_markdown_files(&scan_root))
-            .await
-            .map_err(|e| e.to_string())?
+    let roots = {
+        let vault = state.vault.lock().expect("vault mutex");
+        let mut roots = vault.roots.clone();
+        if !roots.iter().any(|existing| existing.id == root_id) {
+            roots.push(root.clone());
+        }
+        roots
     };
+    let scan_roots = roots.clone();
+    let mut files = tauri::async_runtime::spawn_blocking(move || {
+        scan_roots.iter().flat_map(scan_markdown_files).collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    sort_files(&mut files);
     {
         let mut vault = state.vault.lock().expect("vault mutex");
-        vault.roots = vec![root.clone()];
+        vault.roots = roots.clone();
         vault.files = files;
     }
     state.render_cache.lock().expect("render cache mutex").clear();
-
-    let app_for_watcher = app.clone();
-    let mut watcher = recommended_watcher(move |result: notify::Result<notify::Event>| {
-        if let Ok(event) = result {
-            if event.paths.iter().any(|path| is_markdown(path)) {
-                schedule_refresh(app_for_watcher.clone(), event);
-            }
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    watcher
-        .watch(&root_path, RecursiveMode::Recursive)
-        .map_err(|e| e.to_string())?;
-    *state.watcher.lock().expect("watcher mutex") = Some(watcher);
+    rebuild_watcher(app, &roots)?;
 
     let snapshot = {
         let vault = state.vault.lock().expect("vault mutex");
@@ -547,6 +575,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_vaults,
             add_vault,
+            remove_vault,
             get_vault,
             search_files,
             render_note,
@@ -593,6 +622,24 @@ mod tests {
         assert_eq!(files[0].root_id, root.id);
         assert_eq!(files[0].path, "notes/hello-world.md");
         assert_eq!(files[0].title, "hello world");
+    }
+
+    #[test]
+    fn scanner_includes_mdx_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mdx_path = dir.path().join("notes").join("component-note.mdx");
+        fs::create_dir_all(mdx_path.parent().expect("parent")).expect("mkdir");
+        fs::write(&mdx_path, "# Component").expect("write mdx");
+
+        let root = VaultRoot {
+            id: root_id(dir.path()),
+            name: root_name(dir.path()),
+            path: dir.path().to_path_buf(),
+        };
+        let files = scan_markdown_files(&root);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "notes/component-note.mdx");
     }
 
     #[test]
