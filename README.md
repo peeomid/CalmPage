@@ -2,6 +2,16 @@
 
 CalmPage is a native macOS Markdown reader and viewer for local files, folders, tabs, workspaces, and focus reading.
 
+It exists because AI creates a lot of Markdown, but most apps make it hard to read.
+
+Many apps are good at either reading or file management, but not both.
+CalmPage is built to solve that gap:
+
+- make Markdown easy to read
+- keep folder and file management simple
+- support fast keyboard navigation
+- make long notes feel calm instead of noisy
+
 ![CalmPage app view](docs/app.png)
 
 ![CalmPage focus mode](docs/focus_mode.png)
