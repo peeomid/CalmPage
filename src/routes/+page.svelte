@@ -355,7 +355,12 @@
   let activeTabId = $state<string | null>(null);
   let isOpening = $state(false);
   let isRendering = $state(false);
+  let syncStatus = $state("");
+  let syncStatusTone = $state<"quiet" | "active" | "done" | "error">("quiet");
+  let syncStatusTimeout = 0;
   let error = $state<string | null>(null);
+  let sidebarWidth = $state(300);
+  let resizeSidebarActive = $state(false);
   
   // Modals & Panels State
   let sidebarCollapsed = $state(false);
@@ -429,6 +434,7 @@
   let activeHeadingId = $state("");
   let collapsedFolders = $state<Set<string>>(new Set());
   let noteRequestId = 0;
+  let openTabRefreshRequestId = 0;
   let paletteRequestId = 0;
   let paletteSearchTimeout = 0;
   let headingObserver: IntersectionObserver | null = null;
@@ -485,6 +491,7 @@
       `--reader-code-scale: ${readerCodeScale}em`,
     ].join("; "),
   );
+  let shellStyle = $derived(`--sidebar-width: ${sidebarWidth}px;`);
 
   // Walkthrough steps
   type TourStepSpec = {
@@ -497,7 +504,7 @@
     {
       target: ".sidebar-footer",
       title: "Sidebar Actions Footer",
-      text: 'All folder management tasks are placed down here. Use "Open Folder" or "Add Folder" to scan files, or click "Quick Open" to jump directly using the ⌘K command palette.'
+      text: 'All folder management tasks are placed down here. Use "Open Folder" or "Add Folder" to scan files, or click "Quick Open" to jump directly using the ⌘P command palette.'
     },
     {
       target: "#explorer-search",
@@ -550,6 +557,7 @@
   };
 
   const commandItems: CommandItem[] = [
+    { text: "Open Command Palette", shortcut: ["⌘", "P"], action: () => openPalette("smart") },
     { text: "Toggle Left Sidebar", shortcut: ["⌘", "B"], action: toggleSidebar },
     { text: "Toggle Table of Contents", shortcut: ["⌘", "J"], action: toggleToc },
     { text: "Toggle Focus Reading Mode", shortcut: ["⌘", "."], action: toggleFocusMode },
@@ -557,7 +565,7 @@
     { text: "Previous Open Tab", shortcut: ["⌘", "["], action: () => moveTab(-1) },
     { text: "Close Current Tab", shortcut: ["⌘", "W"], action: closeActiveTab },
     { text: "Close All Open Files", shortcut: [], action: closeAllOpenTabs },
-    { text: "Search Open Tabs", shortcut: ["⌘", "O"], action: () => openPalette("tabs") },
+    { text: "Search Open Tabs", shortcut: ["⌘", "⇧", "O"], action: () => openPalette("tabs") },
     { text: "Find in Current Note", shortcut: ["⌘", "F"], action: openFind },
     { text: "Open Settings Studio", shortcut: ["⌘", ","], action: () => { settingsOpen = true; settingsSection = "appearance"; } },
     { text: "Restart Onboarding Guide", shortcut: [], action: () => startTour() },
@@ -1041,12 +1049,57 @@
     return file.path;
   }
 
+  async function revealFileInLibrary(file: FileEntry) {
+    rememberActiveTabScroll();
+    railMode = "library";
+    sidebarCollapsed = false;
+    settingsOpen = false;
+    rootMenu = null;
+    fileMenu = null;
+    workspaceMenu = null;
+    explorerQuery = "";
+    selectedRootId = file.rootId;
+    selectedPath = file.path;
+
+    if (!activeWorkspaceRootIds.has(file.rootId)) {
+      const workspaceWithRoot = workspaces.find((workspace) => workspace.rootIds.includes(file.rootId));
+      if (workspaceWithRoot) activeWorkspaceId = workspaceWithRoot.id;
+    }
+
+    const nextCollapsed = new Set(collapsedFolders);
+    const parts = file.path.split("/").slice(0, -1);
+    for (let i = 0; i < parts.length; i += 1) {
+      nextCollapsed.delete(`root:${file.rootId}/${parts.slice(0, i + 1).join("/")}`);
+    }
+    nextCollapsed.delete(`root:${file.rootId}`);
+    collapsedFolders = nextCollapsed;
+
+    await tick();
+    const index = treeRows.findIndex((row) => row.type === "file" && row.file.rootId === file.rootId && row.file.path === file.path);
+    if (index >= 0) {
+      const list = document.querySelector<HTMLElement>(".file-list");
+      if (list) list.scrollTo({ top: Math.max(0, index * rowHeight - rowHeight * 4), behavior: "smooth" });
+    }
+  }
+
   function rootFullPath(root: RootEntry) {
     return root.path;
   }
 
   function rootRelativePath(root: RootEntry) {
     return root.name;
+  }
+
+  function rootNameFromPath(path: string) {
+    return path.split("/").filter(Boolean).at(-1) || "Folder";
+  }
+
+  function rootsFromPaths(paths: string[]): RootEntry[] {
+    return paths.map((path) => ({
+      id: path,
+      path,
+      name: rootNameFromPath(path),
+    }));
   }
 
   function noteTabId(rootId: string, path: string) {
@@ -1071,6 +1124,18 @@
     return document.querySelector<HTMLElement>(".reader-scroll")?.scrollTop ?? 0;
   }
 
+  function showSyncStatus(message: string, tone: "quiet" | "active" | "done" | "error" = "quiet", persist = false) {
+    syncStatus = message;
+    syncStatusTone = tone;
+    window.clearTimeout(syncStatusTimeout);
+    if (!persist) {
+      syncStatusTimeout = window.setTimeout(() => {
+        syncStatus = "";
+        syncStatusTone = "quiet";
+      }, tone === "done" ? 2600 : 3600);
+    }
+  }
+
   function rememberActiveTabScroll() {
     if (!activeTabId) return;
     const nextScrollTop = currentReaderScrollTop();
@@ -1083,6 +1148,15 @@
     setTimeout(() => {
       document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: tab.scrollTop });
     }, 0);
+  }
+
+  async function scrollActiveTabIntoView() {
+    await tick();
+    document.querySelector<HTMLElement>(".note-tab.active")?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
   }
 
   function activateTab(tabId: string) {
@@ -1098,6 +1172,7 @@
     closeTocSearch();
     restoreTabScroll(tab);
     saveOpenTabsState();
+    void scrollActiveTabIntoView();
   }
 
   function upsertTab(file: FileEntry, note: RenderedNote, makeActive = true) {
@@ -1119,6 +1194,7 @@
       setTimeout(() => {
         document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: scrollTop });
       }, 0);
+      void scrollActiveTabIntoView();
     }
     saveOpenTabsState();
   }
@@ -1180,7 +1256,7 @@
     collapsedFolders = next;
   }
 
-  function applySnapshot(snapshot: VaultSnapshot) {
+  function applySnapshot(snapshot: VaultSnapshot, persistTabs = true) {
     roots = snapshot.roots;
     files = snapshot.files;
     normalizeWorkspaces(snapshot.roots);
@@ -1210,7 +1286,58 @@
       currentNote = null;
       activeTabId = null;
     }
+    if (persistTabs) saveOpenTabsState();
+  }
+
+  function changedOpenTabFiles(snapshot: VaultSnapshot) {
+    const snapshotFiles = new Map(snapshot.files.map((file) => [noteTabId(file.rootId, file.path), file]));
+    return openTabs
+      .map((tab) => {
+        const nextFile = snapshotFiles.get(tab.id);
+        if (!nextFile) return null;
+        return nextFile.modified !== tab.file.modified || nextFile.size !== tab.file.size ? nextFile : null;
+      })
+      .filter((file): file is FileEntry => Boolean(file));
+  }
+
+  async function refreshChangedOpenTabs(changedFiles: FileEntry[]) {
+    if (changedFiles.length === 0) return;
+    showSyncStatus(`Updating ${changedFiles.length} open file${changedFiles.length === 1 ? "" : "s"}...`, "active", true);
+    const requestId = ++openTabRefreshRequestId;
+    const activeId = activeTabId;
+    const activeScrollTop = currentReaderScrollTop();
+    const renderedUpdates = await Promise.all(
+      changedFiles.map(async (file) => {
+        const note = await invoke<RenderedNote>("render_note", { rootId: file.rootId, path: file.path });
+        return { id: noteTabId(file.rootId, file.path), file, note };
+      }),
+    ).catch((err) => {
+      error = err instanceof Error ? err.message : String(err);
+      showSyncStatus("Could not update open file", "error");
+      return [];
+    });
+    if (requestId !== openTabRefreshRequestId || renderedUpdates.length === 0) return;
+
+    const updates = new Map(renderedUpdates.map((update) => [update.id, update]));
+    openTabs = openTabs.map((tab) => {
+      const update = updates.get(tab.id);
+      if (!update) return tab;
+      return {
+        ...tab,
+        file: update.file,
+        note: update.note,
+        scrollTop: tab.id === activeId ? activeScrollTop : tab.scrollTop,
+      };
+    });
+
+    const activeTab = openTabs.find((tab) => tab.id === activeId);
+    if (activeTab && updates.has(activeTab.id)) {
+      currentNote = activeTab.note;
+      await tick();
+      document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: activeScrollTop });
+    }
     saveOpenTabsState();
+    showSyncStatus(`Updated ${renderedUpdates.length} open file${renderedUpdates.length === 1 ? "" : "s"}`, "done");
   }
 
   function collapseAllFolders(sourceFiles = files) {
@@ -1245,6 +1372,17 @@
         codeScale: readerCodeScale,
       }),
     );
+  }
+
+  function loadSidebarWidth() {
+    const saved = Number(localStorage.getItem("minimal-reader:sidebar-width"));
+    if (Number.isFinite(saved) && saved >= 220 && saved <= 520) {
+      sidebarWidth = saved;
+    }
+  }
+
+  function saveSidebarWidth() {
+    localStorage.setItem("minimal-reader:sidebar-width", String(sidebarWidth));
   }
 
   function loadReaderSettings() {
@@ -1323,6 +1461,42 @@
     } finally {
       isOpening = false;
     }
+  }
+
+  async function refreshFolders() {
+    rootMenu = null;
+    error = null;
+    showSyncStatus("Refreshing folder list...", "active", true);
+    try {
+      const snapshot = await invoke<VaultSnapshot>("refresh_vault_snapshot");
+      applySnapshot(snapshot);
+      collapseAllFolders(snapshot.files);
+      showSyncStatus(`Folder list refreshed · ${snapshot.files.length} files`, "done");
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      showSyncStatus("Could not refresh folder list", "error");
+    }
+  }
+
+  function startSidebarResize(event: PointerEvent) {
+    if (focusMode || sidebarCollapsed) return;
+    resizeSidebarActive = true;
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const minWidth = 220;
+    const maxWidth = 520;
+    const onMove = (moveEvent: PointerEvent) => {
+      sidebarWidth = Math.min(maxWidth, Math.max(minWidth, startWidth + (moveEvent.clientX - startX)));
+    };
+    const onUp = () => {
+      resizeSidebarActive = false;
+      saveSidebarWidth();
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
   }
 
   async function removeFolder(root: RootEntry) {
@@ -1456,6 +1630,7 @@
 
   function showFileMenu(event: MouseEvent, file: FileEntry) {
     event.preventDefault();
+    event.stopPropagation();
     rootMenu = null;
     workspaceMenu = null;
     fileMenu = {
@@ -1467,6 +1642,7 @@
 
   function showWorkspaceMenu(event: MouseEvent, workspace: WorkspaceEntry) {
     event.preventDefault();
+    event.stopPropagation();
     rootMenu = null;
     fileMenu = null;
     workspaceMenu = {
@@ -2122,6 +2298,7 @@
     }
     customThemePresets = safeJson<CustomThemePreset[]>("minimal-reader:custom-theme-presets", []);
     loadReaderSettings();
+    loadSidebarWidth();
 
     workspaces = safeJson<WorkspaceEntry[]>("minimal-reader:workspaces", []);
     activeWorkspaceId = localStorage.getItem("minimal-reader:active-workspace") ?? "default";
@@ -2132,20 +2309,24 @@
 
     const folders = safeJson<string[]>("minimal-reader:folders", []);
     if (folders.length > 0) {
+      roots = rootsFromPaths(folders);
+      normalizeWorkspaces(roots);
       isOpening = true;
-      invoke<VaultSnapshot>("open_vaults", { paths: folders })
-        .then((snapshot) => {
-          applySnapshot(snapshot);
-          collapseAllFolders(snapshot.files);
-          normalizeWorkspaces(snapshot.roots);
-          return restoreOpenTabsFromStorage();
-        })
-        .catch((err) => {
-          error = err instanceof Error ? err.message : String(err);
-        })
-        .finally(() => {
-          isOpening = false;
-        });
+      window.setTimeout(() => {
+        invoke<VaultSnapshot>("open_vaults", { paths: folders })
+          .then((snapshot) => {
+            applySnapshot(snapshot, false);
+            collapseAllFolders(snapshot.files);
+            normalizeWorkspaces(snapshot.roots);
+            return restoreOpenTabsFromStorage();
+          })
+          .catch((err) => {
+            error = err instanceof Error ? err.message : String(err);
+          })
+          .finally(() => {
+            isOpening = false;
+          });
+      }, 50);
     }
 
     const keydown = (event: KeyboardEvent) => {
@@ -2156,6 +2337,12 @@
       if (event.key === "Escape") {
         if (rootMenu) {
           rootMenu = null;
+          event.preventDefault();
+        } else if (fileMenu) {
+          fileMenu = null;
+          event.preventDefault();
+        } else if (workspaceMenu) {
+          workspaceMenu = null;
           event.preventDefault();
         } else if (focusMode) {
           closeTocSearch();
@@ -2183,21 +2370,9 @@
         return;
       }
 
-      if (isCmd && event.shiftKey && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        openPalette("actions");
-        return;
-      }
-
-      if (isCmd && !event.shiftKey && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        openPalette("smart");
-        return;
-      }
-
       if (isCmd && !event.shiftKey && event.key.toLowerCase() === "p") {
         event.preventDefault();
-        openPalette("files");
+        openPalette("smart");
         return;
       }
 
@@ -2216,7 +2391,7 @@
 
       if (isCmd && event.shiftKey && event.key.toLowerCase() === "o") {
         event.preventDefault();
-        openPalette("headings");
+        openPalette("tabs");
         return;
       }
 
@@ -2283,7 +2458,13 @@
     window.addEventListener("keydown", keydown, { capture: true });
 
     const unlistenPromise = listen<VaultSnapshot>("vault-updated", (event) => {
+      const changedFiles = changedOpenTabFiles(event.payload);
       applySnapshot(event.payload);
+      if (changedFiles.length > 0) {
+        void refreshChangedOpenTabs(changedFiles);
+      } else {
+        showSyncStatus(`Folder list updated · ${event.payload.files.length} files`, "done");
+      }
       if (paletteOpen) void refreshPaletteResults();
     });
     const unlistenOpenedFilesPromise = listen<string[]>("opened-markdown-files", (event) => {
@@ -2308,6 +2489,11 @@
       if (focusExitHintTimeout) clearTimeout(focusExitHintTimeout);
       window.clearTimeout(readerScrollTimeout);
     };
+  });
+
+  $effect(() => {
+    if (!activeTabId || focusMode || openTabs.length === 0) return;
+    void scrollActiveTabIntoView();
   });
 
   $effect(() => {
@@ -2389,6 +2575,7 @@
   class="app-shell"
   class:focus-mode={focusMode}
   class:sidebar-collapsed={effectiveSidebarCollapsed}
+  style={shellStyle}
 >
   <!-- LEFT RAIL -->
   <nav class="rail" aria-label="Primary navigation">
@@ -2417,7 +2604,10 @@
         <h1>{railMode === "workspaces" ? workspaceLabel : rootLabel}</h1>
       </div>
       {#if railMode === "library"}
-        <button class="root-add-button" onclick={addFolder} disabled={isOpening} title="Add Folder">+</button>
+        <div class="root-actions">
+          <button class="root-add-button" onclick={refreshFolders} title="Refresh Folder List">↻</button>
+          <button class="root-add-button" onclick={addFolder} disabled={isOpening} title="Add Folder">+</button>
+        </div>
       {/if}
     </div>
 
@@ -2534,7 +2724,7 @@
 
       <div class="status-line">
         <span>{explorerQuery.trim() ? `${explorerFilteredFiles.length}/${activeWorkspaceFiles.length}` : activeWorkspaceFiles.length} files</span>
-        <span>{activeWorkspaceRoots.length > 0 ? "Watching" : "Idle"}</span>
+        <span>{isOpening ? "Scanning" : activeWorkspaceRoots.length > 0 ? "Watching" : "Idle"}</span>
       </div>
 
       {#if error}
@@ -2619,6 +2809,15 @@
     {/if}
   </aside>
 
+  <div
+    class="sidebar-resize-handle"
+    class:active={resizeSidebarActive}
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="Resize sidebar"
+    onpointerdown={startSidebarResize}
+  ></div>
+
   {#if rootMenu}
     <div
       class="root-context-menu"
@@ -2643,6 +2842,9 @@
       <button onclick={() => void navigator.clipboard.writeText(rootMenu ? rootRelativePath(rootMenu.root) : "")}>
         Copy relative path
       </button>
+      <button onclick={refreshFolders}>
+        Refresh folder list
+      </button>
       <button class="danger" onclick={() => rootMenu && removeFolder(rootMenu.root)} disabled={isOpening}>
         Remove from Library
       </button>
@@ -2664,6 +2866,9 @@
         <strong>{fileMenu.file.title}</strong>
         <small>{fileFullPath(fileMenu.file)}</small>
       </div>
+      <button onclick={() => fileMenu && revealFileInLibrary(fileMenu.file)}>
+        Show in library
+      </button>
       <button onclick={() => void navigator.clipboard.writeText(fileRelativePath(fileMenu!.file))}>
         Copy relative path
       </button>
@@ -2722,6 +2927,7 @@
                 class="note-tab"
                 class:active={tab.id === activeTabId}
                 onclick={() => activateTab(tab.id)}
+                oncontextmenu={(event) => showFileMenu(event, tab.file)}
                 title={`${tab.file.rootName} / ${tab.file.path}`}
               >
                 <span class="tab-index">{index + 1}</span>
@@ -2744,6 +2950,12 @@
             {/each}
           </nav>
           <button class="tab-scroll-btn" onclick={() => scrollTabs(240)} aria-label="Scroll tabs right">›</button>
+        </div>
+      {/if}
+      {#if syncStatus}
+        <div class="sync-status" class:active={syncStatusTone === "active"} class:done={syncStatusTone === "done"} class:error={syncStatusTone === "error"}>
+          <span aria-hidden="true"></span>
+          {syncStatus}
         </div>
       {/if}
     </header>
@@ -2799,7 +3011,7 @@
           <p class="eyebrow">Ready to read</p>
           <h2>Choose a Markdown file to begin.</h2>
           <p>
-            Add folders from the Library panel, then pick a note from the list. You can also press <kbd>⌘K</kbd> to quickly open files, tabs, headings, settings, and workspaces.
+            Add folders from the Library panel, then pick a note from the list. You can also press <kbd>⌘P</kbd> to quickly open files, tabs, headings, settings, and workspaces.
           </p>
           <p class="hero-empty-hint">
             Tip: use the <strong>+</strong> button beside Library when you want to add a folder.
@@ -3032,7 +3244,8 @@ reader.apply(preset);</code></pre>
         <div class="settings-section">
           <div class="settings-section-title">Keyboard</div>
           <div class="settings-shortcut-list">
-            <span>Command palette <kbd>⌘K</kbd></span>
+            <span>Command palette <kbd>⌘P</kbd></span>
+            <span>Search open tabs <kbd>⇧⌘O</kbd></span>
             <span>Find in document <kbd>⌘F</kbd></span>
             <span>Filter file tree <kbd>⇧⌘F</kbd></span>
             <span>Focus mode <kbd>⌘.</kbd></span>
@@ -3080,7 +3293,7 @@ reader.apply(preset);</code></pre>
       <div class="hud-list">
         <div class="hud-row">
           <span class="hud-desc">Open Command Palette</span>
-          <div class="hud-keys"><kbd class="hud-key">⌘</kbd><kbd class="hud-key">K</kbd></div>
+          <div class="hud-keys"><kbd class="hud-key">⌘</kbd><kbd class="hud-key">P</kbd></div>
         </div>
         <div class="hud-row">
           <span class="hud-desc">Toggle Left Sidebar</span>
@@ -3115,7 +3328,7 @@ reader.apply(preset);</code></pre>
           <div class="hud-keys"><kbd class="hud-key">↑</kbd><kbd class="hud-key">↓</kbd><kbd class="hud-key">J</kbd><kbd class="hud-key">K</kbd></div>
         </div>
         <div class="hud-row">
-          <span class="hud-desc">Search Headings Popover (Any Mode)</span>
+          <span class="hud-desc">Search Open Tabs</span>
           <div class="hud-keys"><kbd class="hud-key">⌘</kbd><kbd class="hud-key">⇧</kbd><kbd class="hud-key">O</kbd></div>
         </div>
         <div class="hud-row">
@@ -3323,24 +3536,22 @@ reader.apply(preset);</code></pre>
   }
 
   .app-shell {
-    display: grid;
-    grid-template-columns: 56px 300px minmax(0, 1fr);
+    display: flex;
     height: 100vh;
-    transition: grid-template-columns 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
     --sidebar-width: 300px;
     --toc-width: 260px;
   }
 
   .app-shell.sidebar-collapsed {
-    grid-template-columns: 56px 0px minmax(0, 1fr);
+    --sidebar-width: 0px;
   }
 
   .app-shell.focus-mode {
-    grid-template-columns: 0px 0px minmax(0, 1fr);
+    --sidebar-width: 0px;
   }
 
   .rail {
-    grid-column: 1;
+    flex: 0 0 56px;
     height: 100vh;
     min-height: 0;
     display: flex;
@@ -3358,6 +3569,9 @@ reader.apply(preset);</code></pre>
   .focus-mode .rail {
     opacity: 0;
     pointer-events: none;
+    flex-basis: 0;
+    padding-inline: 0;
+    border-right: 0;
   }
 
   .rail-brand {
@@ -3445,7 +3659,8 @@ reader.apply(preset);</code></pre>
   }
 
   .sidebar {
-    grid-column: 2;
+    flex: 0 0 var(--sidebar-width);
+    width: var(--sidebar-width);
     height: 100vh;
     min-height: 0;
     display: flex;
@@ -3454,13 +3669,47 @@ reader.apply(preset);</code></pre>
     padding: 18px 18px 0;
     border-right: 1px solid var(--line);
     background: var(--panel);
-    transition: opacity 0.25s ease;
+    color: var(--text);
+    transition: flex-basis 0.18s ease, width 0.18s ease, opacity 0.25s ease, padding 0.18s ease;
     overflow: hidden;
+  }
+
+  .sidebar-resize-handle {
+    flex: 0 0 8px;
+    width: 8px;
+    height: 100vh;
+    margin-left: -4px;
+    margin-right: -4px;
+    cursor: col-resize;
+    z-index: 3;
+    background: transparent;
+  }
+
+  .sidebar-resize-handle::after {
+    content: "";
+    display: block;
+    width: 2px;
+    height: 100%;
+    margin: 0 auto;
+    background: transparent;
+    transition: background 0.15s ease;
+  }
+
+  .sidebar-resize-handle:hover::after,
+  .sidebar-resize-handle.active::after {
+    background: var(--accent-soft);
   }
 
   .sidebar-collapsed .sidebar {
     opacity: 0;
     pointer-events: none;
+    padding-inline: 0;
+    border-right: 0;
+  }
+
+  .sidebar-collapsed .sidebar-resize-handle,
+  .focus-mode .sidebar-resize-handle {
+    display: none;
   }
 
   .brand {
@@ -3468,6 +3717,12 @@ reader.apply(preset);</code></pre>
     justify-content: space-between;
     gap: 16px;
     align-items: flex-start;
+  }
+
+  .root-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
   }
 
   .eyebrow {
@@ -4070,7 +4325,7 @@ reader.apply(preset);</code></pre>
 
   /* Reader frame */
   .reader-frame {
-    grid-column: 3;
+    flex: 1 1 auto;
     height: 100vh;
     min-width: 0;
     min-height: 0;
@@ -4448,6 +4703,49 @@ reader.apply(preset);</code></pre>
     color: var(--text);
     background: color-mix(in srgb, var(--line) 70%, transparent);
     outline: none;
+  }
+
+  .sync-status {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    max-width: 260px;
+    padding: 6px 10px;
+    border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+    border-radius: 999px;
+    color: var(--muted);
+    background: color-mix(in srgb, var(--panel) 62%, transparent);
+    font-size: 11px;
+    font-weight: 750;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sync-status span {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--faint);
+  }
+
+  .sync-status.active span {
+    background: var(--accent-strong);
+    animation: blink 1s ease-in-out infinite;
+  }
+
+  .sync-status.done span {
+    background: #5f9f68;
+  }
+
+  .sync-status.error {
+    color: #b94d3f;
+    border-color: color-mix(in srgb, #b94d3f 35%, transparent);
+  }
+
+  .sync-status.error span {
+    background: #b94d3f;
   }
 
   .reader {
@@ -5707,30 +6005,4 @@ reader.apply(preset);</code></pre>
     transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
   }
 
-  @media (max-width: 820px) {
-    .app-shell {
-      grid-template-columns: 48px minmax(0, 1fr);
-    }
-
-    .sidebar {
-      display: none;
-    }
-
-    .rail {
-      grid-column: 1;
-      padding-inline: 6px;
-    }
-
-    .reader-frame {
-      grid-column: 2;
-    }
-
-    .reader-scroll {
-      padding: 32px 18px 64px;
-    }
-
-    .toc-rail {
-      display: none;
-    }
-  }
 </style>

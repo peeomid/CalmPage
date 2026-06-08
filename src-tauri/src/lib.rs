@@ -528,6 +528,13 @@ fn get_vault(state: State<AppState>) -> VaultSnapshot {
 }
 
 #[tauri::command]
+fn refresh_vault_snapshot(app: AppHandle, state: State<'_, AppState>) -> VaultSnapshot {
+    refresh_vault(&app, &state);
+    let vault = state.vault.lock().expect("vault mutex");
+    snapshot(&vault)
+}
+
+#[tauri::command]
 fn search_files(state: State<AppState>, query: String, limit: usize) -> Vec<FileEntry> {
     let needle = query.trim().to_lowercase();
     let limit = limit.clamp(1, 80);
@@ -664,6 +671,7 @@ pub fn run() {
             add_vault,
             remove_vault,
             get_vault,
+            refresh_vault_snapshot,
             search_files,
             render_note,
             open_markdown_file

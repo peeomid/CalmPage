@@ -34,7 +34,7 @@ jobs:
         with:
           files: |
             src-tauri/target/release/bundle/macos/CalmPage.app
-            src-tauri/target/release/bundle/dmg/CalmPage_0.1.0_aarch64.dmg
-          body_path: docs/releases/v0.1.0.md
+            src-tauri/target/release/bundle/dmg/CalmPage_0.1.1_aarch64.dmg
+          body_path: docs/releases/v0.1.1.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
