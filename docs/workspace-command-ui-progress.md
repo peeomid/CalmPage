@@ -178,3 +178,22 @@ Review gates:
 - [x] `npm run check` — 0 errors, 11 existing warnings.
 - [x] `npm run tauri build`.
 - [x] Install updated app into `/Applications`.
+
+## v0.1.2 Navigation Updates
+
+Status: Complete
+
+Tasks:
+- [x] Add pinned files as a saved local shortcut list.
+- [x] Show pinned files above the Library file tree.
+- [x] Add `Pin file` and `Unpin file` actions to file and tab context menus.
+- [x] Add pinned-file rows to the command palette.
+- [x] Add `!` prefix for pinned-only command palette search.
+- [x] Speed up command palette path search for pasted paths that are not indexed yet.
+- [x] Normalize pasted paths that contain extra spaces or newlines.
+- [x] Restore tab scroll position instantly when switching back to a document.
+
+Review gates:
+- [x] `npm run check` — 0 errors, existing accessibility warnings.
+- [x] `npm run tauri build`.
+- [x] Release published as `v0.1.2`.

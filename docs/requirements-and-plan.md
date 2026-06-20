@@ -188,5 +188,11 @@ Future theme system:
 - Reader view uses static HTML/CSS, not an editor model.
 - Command palette supports arrow keys and `Enter`.
 - Command palette supports `Escape` while the input is focused.
+- Command palette supports grouped modes for actions, files, open tabs, headings, settings, workspaces, and pinned files.
+- Command palette supports `!` for pinned-file search.
+- If a pasted path points to a file that is not indexed yet, the backend searches likely nearby folders instead of scanning the whole vault.
+- Path search normalizes pasted terminal paths that may contain extra spaces or newlines.
+- Pinned files are stored locally and shown above the Library tree.
+- Tab scroll positions are restored when switching documents without showing a visible scroll animation.
 - Last folder and theme are saved in local storage for a smoother app restart.
 - Reader typography preset is saved in local storage.

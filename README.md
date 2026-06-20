@@ -23,6 +23,7 @@ It is made for people who want:
 - a clean Markdown reader instead of a full editor
 - fast access to local Markdown folders and notes
 - tabs for opening multiple files at once
+- pinned files for notes you open often
 - workspaces for grouping different folder sets
 - focus mode, table of contents, and keyboard shortcuts
 
@@ -31,9 +32,11 @@ It is made for people who want:
 - Open one or many Markdown folders
 - Browse Markdown files in a clean library view
 - Open several files in tabs
+- Pin important files so they stay easy to reopen
 - Use focus mode for distraction-free reading
 - Show a table of contents for long documents
-- Use the command palette to jump to files, tabs, headings, actions, settings, and workspaces
+- Use the command palette to jump to files, pinned files, tabs, headings, actions, settings, and workspaces
+- Paste a file path into the command palette to find a file that is not indexed yet
 - Customize reading style, colors, spacing, and Markdown rendering
 
 ## What CalmPage is for
@@ -67,6 +70,7 @@ Most important shortcuts:
 - `Cmd+[` and `Cmd+]` move between tabs
 - `Cmd+W` close the current tab
 - `Cmd+F` search inside the current note
+- `Cmd+Shift+O` search open tabs
 - `Cmd+,` open settings
 
 If you forget a shortcut, press `?` to open the shortcut help panel.
@@ -99,6 +103,35 @@ You can create, rename, switch, duplicate, and delete workspaces.
 CalmPage can keep multiple Markdown files open at the same time.
 
 This is useful when you want to compare files or move back and forth without losing your place.
+
+When you switch away from a tab and come back later, CalmPage keeps your reading position without showing a visible scroll jump.
+
+### Pinned Files
+
+Pinned files are shortcuts for Markdown files you open often.
+
+- Right-click a file or tab and choose `Pin file`
+- Pinned files appear above the Library tree
+- Pinned tabs show a small pin marker
+- Use `!` in the command palette to search only pinned files
+
+Pins are saved locally on your Mac.
+
+## Command Palette
+
+The command palette is the fastest way to move around CalmPage.
+
+Useful prefixes:
+
+- `>` actions
+- `/` files
+- `@` open tabs
+- `#` headings in the current note
+- `?` settings
+- `:` workspaces
+- `!` pinned files
+
+You can also paste a file path into the command palette. If the file is not indexed yet, CalmPage makes a few likely path matches and searches only nearby folders instead of scanning the whole vault.
 
 ## Focus Mode
 
