@@ -101,6 +101,19 @@
     pinnedAt: number;
   };
 
+  type SavedOpenTab = {
+    rootId: string;
+    path: string;
+    scrollTop?: number;
+  };
+
+  type RestoredOpenTab = {
+    id: string;
+    file: FileEntry;
+    note: RenderedNote;
+    scrollTop: number;
+  };
+
   type WorkspaceEntry = {
     id: string;
     name: string;
@@ -488,10 +501,11 @@
   let pinnedFiles = $state<PinnedFileRecord[]>([]);
   let activePinnedFiles = $derived.by<FileEntry[]>(() => {
     const indexedFiles = new Map(files.map((file) => [noteTabId(file.rootId, file.path), file]));
+    const rootById = new Map(roots.map((root) => [root.id, root]));
     return pinnedFiles
       .filter((pin) => activeWorkspaceRootIds.has(pin.rootId))
       .sort((a, b) => b.pinnedAt - a.pinnedAt)
-      .map((pin) => indexedFiles.get(noteTabId(pin.rootId, pin.path)))
+      .map((pin) => indexedFiles.get(noteTabId(pin.rootId, pin.path)) ?? pinnedFileFallback(pin, rootById.get(pin.rootId)))
       .filter((file): file is FileEntry => Boolean(file));
   });
   let filteredTocItems = $derived(
@@ -514,7 +528,7 @@
       `--reader-code-scale: ${readerCodeScale}em`,
     ].join("; "),
   );
-  let shellStyle = $derived(`--sidebar-width: ${sidebarWidth}px;`);
+  let shellStyle = $derived(`--sidebar-width: ${effectiveSidebarCollapsed ? 0 : sidebarWidth}px;`);
 
   // Walkthrough steps
   type TourStepSpec = {
@@ -1147,6 +1161,23 @@
     return `${rootId}:${path}`;
   }
 
+  function titleFromPath(path: string) {
+    const name = path.split(/[\\/]/).pop() ?? path;
+    return name.replace(/\.(md|markdown|mdx)$/i, "") || name || "Untitled";
+  }
+
+  function pinnedFileFallback(pin: PinnedFileRecord, root?: RootEntry): FileEntry | null {
+    if (!root) return null;
+    return {
+      rootId: pin.rootId,
+      rootName: root.name,
+      path: pin.path,
+      title: titleFromPath(pin.path),
+      modified: 0,
+      size: 0,
+    };
+  }
+
   function saveOpenTabsState(nextTabs = openTabs, nextActiveTabId = activeTabId) {
     localStorage.setItem(
       "minimal-reader:open-tabs",
@@ -1191,7 +1222,13 @@
     await tick();
     const scrollContainer = document.querySelector<HTMLElement>(".reader-scroll");
     if (scrollContainer) {
+      const previousScrollBehavior = scrollContainer.style.scrollBehavior;
+      scrollContainer.style.scrollBehavior = "auto";
+      scrollContainer.scrollTo({ top: scrollTop, behavior: "auto" });
       scrollContainer.scrollTop = scrollTop;
+      requestAnimationFrame(() => {
+        scrollContainer.style.scrollBehavior = previousScrollBehavior;
+      });
     }
     requestAnimationFrame(() => {
       if (restoreId === readerScrollRestoreId) {
@@ -1207,7 +1244,7 @@
   async function scrollActiveTabIntoView() {
     await tick();
     document.querySelector<HTMLElement>(".note-tab.active")?.scrollIntoView({
-      behavior: "smooth",
+      behavior: "auto",
       block: "nearest",
       inline: "nearest",
     });
@@ -1312,8 +1349,13 @@
     roots = snapshot.roots;
     files = snapshot.files;
     normalizeWorkspaces(snapshot.roots);
-    const existingFiles = new Set(snapshot.files.map((file) => noteTabId(file.rootId, file.path)));
-    openTabs = openTabs.filter((tab) => existingFiles.has(tab.id));
+    const snapshotFiles = new Map(snapshot.files.map((file) => [noteTabId(file.rootId, file.path), file]));
+    openTabs = openTabs
+      .map((tab) => {
+        const snapshotFile = snapshotFiles.get(tab.id);
+        return snapshotFile ? { ...tab, file: snapshotFile } : null;
+      })
+      .filter((tab): tab is OpenNoteTab => Boolean(tab));
     if (activeTabId && !openTabs.some((tab) => tab.id === activeTabId)) {
       const nextTab = openTabs[0];
       if (nextTab) {
@@ -2434,8 +2476,72 @@
     return files.find((file) => file.rootId === rootId && file.path === path) ?? null;
   }
 
+  function savedTabFile(savedTab: SavedOpenTab) {
+    const indexedFile = snapshotFile(savedTab.rootId, savedTab.path);
+    if (indexedFile) return indexedFile;
+    const root = roots.find((candidate) => candidate.id === savedTab.rootId);
+    return pinnedFileFallback({ rootId: savedTab.rootId, path: savedTab.path, pinnedAt: 0 }, root);
+  }
+
+  async function restoreSavedTab(savedTab: SavedOpenTab): Promise<RestoredOpenTab | null> {
+    const file = savedTabFile(savedTab);
+    if (!file) return null;
+    try {
+      const root = roots.find((candidate) => candidate.id === savedTab.rootId);
+      const note = await invoke<RenderedNote>("render_saved_note", {
+        rootPath: root?.path ?? savedTab.rootId,
+        path: savedTab.path,
+      });
+      return {
+        id: noteTabId(file.rootId, file.path),
+        file,
+        note,
+        scrollTop: savedTab.scrollTop ?? 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function applyRestoredOpenTab(savedTabs: SavedOpenTab[], restoredTab: RestoredOpenTab) {
+    const currentTabs = new Map(openTabs.map((tab) => [tab.id, tab]));
+    if (!currentTabs.has(restoredTab.id)) {
+      currentTabs.set(restoredTab.id, restoredTab);
+    }
+
+    const orderedTabs = savedTabs
+      .map((savedTab) => currentTabs.get(noteTabId(savedTab.rootId, savedTab.path)))
+      .filter((tab): tab is OpenNoteTab => Boolean(tab));
+
+    const orderedIds = new Set(orderedTabs.map((tab) => tab.id));
+    const extraTabs = openTabs.filter((tab) => !orderedIds.has(tab.id));
+    openTabs = [...orderedTabs, ...extraTabs];
+
+    if (!activeTabId) {
+      activeTabId = restoredTab.id;
+      currentNote = restoredTab.note;
+      selectedRootId = restoredTab.file.rootId;
+      selectedPath = restoredTab.file.path;
+      void restoreReaderScrollInstant(restoredTab.scrollTop);
+      void scrollActiveTabIntoView();
+    }
+
+    saveOpenTabsState();
+  }
+
+  function restoreRemainingOpenTabs(savedTabs: SavedOpenTab[], activeId: string) {
+    const remainingTabs = savedTabs.filter((savedTab) => noteTabId(savedTab.rootId, savedTab.path) !== activeId);
+    if (remainingTabs.length === 0) return;
+
+    for (const savedTab of remainingTabs) {
+      void restoreSavedTab(savedTab).then((restoredTab) => {
+        if (restoredTab) applyRestoredOpenTab(savedTabs, restoredTab);
+      });
+    }
+  }
+
   async function restoreOpenTabsFromStorage() {
-    const savedOpenTabs = safeJson<Array<{ rootId: string; path: string; scrollTop?: number }>>("minimal-reader:open-tabs", []);
+    const savedOpenTabs = safeJson<SavedOpenTab[]>("minimal-reader:open-tabs", []);
     const savedActiveTabId = localStorage.getItem("minimal-reader:active-tab") || null;
     if (savedOpenTabs.length === 0) return;
 
@@ -2445,28 +2551,27 @@
     selectedRootId = null;
     selectedPath = null;
 
-    for (const savedTab of savedOpenTabs) {
-      const file = snapshotFile(savedTab.rootId, savedTab.path);
-      if (!file) continue;
-      try {
-        const note = await invoke<RenderedNote>("render_note", { rootId: savedTab.rootId, path: savedTab.path });
-        upsertTab(file, note, false);
-        if (savedTab.scrollTop !== undefined) {
-          const tabId = noteTabId(file.rootId, file.path);
-          openTabs = openTabs.map((tab) => (tab.id === tabId ? { ...tab, scrollTop: savedTab.scrollTop ?? 0 } : tab));
-        }
-      } catch {
-        continue;
-      }
+    const validSavedTabs = savedOpenTabs.filter((savedTab) => savedTabFile(savedTab));
+    const activeSavedTab = validSavedTabs.find((savedTab) => noteTabId(savedTab.rootId, savedTab.path) === savedActiveTabId) ?? validSavedTabs[0];
+    if (!activeSavedTab) {
+      saveOpenTabsState([], null);
+      return;
     }
 
-    if (savedActiveTabId && openTabs.some((tab) => tab.id === savedActiveTabId)) {
-      activateTab(savedActiveTabId);
-    } else if (openTabs.length > 0) {
-      activateTab(openTabs[0].id);
-    } else {
-      saveOpenTabsState([], null);
+    const activeTab = await restoreSavedTab(activeSavedTab);
+    if (!activeTab) {
+      void restoreRemainingOpenTabs(validSavedTabs, "");
+      return;
     }
+
+    openTabs = [activeTab];
+    activeTabId = activeTab.id;
+    currentNote = activeTab.note;
+    selectedRootId = activeTab.file.rootId;
+    selectedPath = activeTab.file.path;
+    await restoreReaderScrollInstant(activeTab.scrollTop);
+    void scrollActiveTabIntoView();
+    void restoreRemainingOpenTabs(validSavedTabs, activeTab.id);
   }
 
   onMount(() => {
@@ -2501,6 +2606,7 @@
     if (folders.length > 0) {
       roots = rootsFromPaths(folders);
       normalizeWorkspaces(roots);
+      void restoreOpenTabsFromStorage();
       isOpening = true;
       window.setTimeout(() => {
         invoke<VaultSnapshot>("open_vaults", { paths: folders })
@@ -2508,7 +2614,6 @@
             applySnapshot(snapshot, false);
             collapseAllFolders(snapshot.files);
             normalizeWorkspaces(snapshot.roots);
-            return restoreOpenTabsFromStorage();
           })
           .catch((err) => {
             error = err instanceof Error ? err.message : String(err);
@@ -3185,12 +3290,6 @@
           <button class="tab-scroll-btn" onclick={() => scrollTabs(240)} aria-label="Scroll tabs right">›</button>
         </div>
       {/if}
-      {#if syncStatus}
-        <div class="sync-status" class:active={syncStatusTone === "active"} class:done={syncStatusTone === "done"} class:error={syncStatusTone === "error"}>
-          <span aria-hidden="true"></span>
-          {syncStatus}
-        </div>
-      {/if}
     </header>
 
     <div class="reader-floating-actions" aria-label="Reader controls">
@@ -3296,6 +3395,20 @@
     {/if}
   </section>
 </main>
+
+{#if syncStatus}
+  <div
+    class="sync-status"
+    class:active={syncStatusTone === "active"}
+    class:done={syncStatusTone === "done"}
+    class:error={syncStatusTone === "error"}
+    role="status"
+    aria-live={syncStatusTone === "error" ? "assertive" : "polite"}
+  >
+    <span aria-hidden="true"></span>
+    {syncStatus}
+  </div>
+{/if}
 
 <!-- SETTINGS STUDIO -->
 <div class="settings-drawer" class:open={settingsOpen} transition:fade={{ duration: 150 }}>
@@ -3825,6 +3938,7 @@ reader.apply(preset);</code></pre>
     transition: opacity 0.2s ease;
   }
 
+  .sidebar-collapsed .rail,
   .focus-mode .rail {
     opacity: 0;
     pointer-events: none;
@@ -4870,7 +4984,6 @@ reader.apply(preset);</code></pre>
     overflow-x: hidden;
     padding: 52px 32px 120px; /* comfy bottom spacing */
     -webkit-overflow-scrolling: touch;
-    scroll-behavior: smooth;
     scroll-padding-top: 32px;
     scrollbar-width: thin;
     scrollbar-color: transparent transparent;
@@ -5020,21 +5133,27 @@ reader.apply(preset);</code></pre>
   }
 
   .sync-status {
-    flex: 0 0 auto;
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 80;
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    max-width: 260px;
-    padding: 6px 10px;
-    border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
-    border-radius: 999px;
+    max-width: min(360px, calc(100vw - 36px));
+    padding: 9px 12px;
+    border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+    border-radius: 8px;
     color: var(--muted);
-    background: color-mix(in srgb, var(--panel) 62%, transparent);
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    box-shadow: 0 14px 32px rgba(22, 18, 12, 0.16);
+    backdrop-filter: blur(14px);
     font-size: 11px;
     font-weight: 750;
-    white-space: nowrap;
+    line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
+    pointer-events: none;
   }
 
   .sync-status span {

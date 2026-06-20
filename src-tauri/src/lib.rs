@@ -607,6 +607,62 @@ fn sort_files(files: &mut [FileEntry]) {
     });
 }
 
+async fn render_note_file(
+    state: &AppState,
+    cache_key: String,
+    note_path: String,
+    file_path: PathBuf,
+) -> Result<RenderedNote, String> {
+    let modified = modified_secs(&file_path);
+    let size = file_size(&file_path);
+    if let Some(cached) = state
+        .render_cache
+        .lock()
+        .expect("render cache mutex")
+        .get(&cache_key)
+    {
+        if cached.modified == modified && cached.size == size {
+            return Ok(cached.note.clone());
+        }
+    }
+
+    let note = {
+        let file_path = file_path.clone();
+        let note_path = note_path.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<RenderedNote, String> {
+            let markdown = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
+            let title = note_title(&markdown, &note_path);
+            Ok(RenderedNote {
+                path: note_path,
+                title,
+                html: render_markdown(&markdown),
+                modified,
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
+
+    {
+        let mut cache = state.render_cache.lock().expect("render cache mutex");
+        if cache.len() >= 64 {
+            if let Some(oldest_key) = cache.keys().next().cloned() {
+                cache.remove(&oldest_key);
+            }
+        }
+        cache.insert(
+            cache_key,
+            CachedRendered {
+                modified,
+                size,
+                note: note.clone(),
+            },
+        );
+    }
+
+    Ok(note)
+}
+
 fn rebuild_watcher(app: AppHandle, roots: &[VaultRoot]) -> Result<(), String> {
     let app_for_watcher = app.clone();
     let mut watcher = recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -950,52 +1006,23 @@ async fn render_note(
             .ok_or("Open this note's folder first")?
     };
     let file_path = abs_note_path(&root, &path)?;
-    let modified = modified_secs(&file_path);
-    let size = file_size(&file_path);
     let cache_key = format!("{}:{}", root_id, path);
-    if let Some(cached) = state
-        .render_cache
-        .lock()
-        .expect("render cache mutex")
-        .get(&cache_key)
-    {
-        if cached.modified == modified && cached.size == size {
-            return Ok(cached.note.clone());
-        }
+    render_note_file(&state, cache_key, path, file_path).await
+}
+
+#[tauri::command]
+async fn render_saved_note(
+    state: State<'_, AppState>,
+    root_path: String,
+    path: String,
+) -> Result<RenderedNote, String> {
+    let root = PathBuf::from(&root_path);
+    if !root.is_dir() {
+        return Err("Open this note's folder first".to_string());
     }
-    let note = {
-        let file_path = file_path.clone();
-        let note_path = path.clone();
-        tauri::async_runtime::spawn_blocking(move || -> Result<RenderedNote, String> {
-            let markdown = fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
-            let title = note_title(&markdown, &note_path);
-            Ok(RenderedNote {
-                path: note_path,
-                title,
-                html: render_markdown(&markdown),
-                modified,
-            })
-        })
-        .await
-        .map_err(|e| e.to_string())??
-    };
-    {
-        let mut cache = state.render_cache.lock().expect("render cache mutex");
-        if cache.len() >= 64 {
-            if let Some(oldest_key) = cache.keys().next().cloned() {
-                cache.remove(&oldest_key);
-            }
-        }
-        cache.insert(
-            cache_key,
-            CachedRendered {
-                modified,
-                size,
-                note: note.clone(),
-            },
-        );
-    }
-    Ok(note)
+    let file_path = abs_note_path(&root, &path)?;
+    let cache_key = format!("{}:{}", root_id(&root), path);
+    render_note_file(&state, cache_key, path, file_path).await
 }
 
 #[tauri::command]
@@ -1079,6 +1106,7 @@ pub fn run() {
             search_files,
             find_missing_files,
             render_note,
+            render_saved_note,
             open_markdown_file
         ])
         .build(tauri::generate_context!())
