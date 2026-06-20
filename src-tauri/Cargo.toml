@@ -1,6 +1,6 @@
 [package]
 name = "minimal-markdown-reader"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Tauri App"
 authors = ["Luan Nguyen Thanh"]
 edition = "2021"
