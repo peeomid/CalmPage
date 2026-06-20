@@ -93,8 +93,13 @@
 
   type SettingsSection = "general" | "shortcuts" | "files" | "appearance" | "toc" | "markdown" | "advanced";
   type RailMode = "library" | "workspaces";
-  type PaletteMode = "smart" | "actions" | "files" | "tabs" | "headings" | "settings" | "workspaces";
-  type PaletteGroupId = "open-tabs" | "files" | "headings" | "actions" | "settings" | "workspaces";
+  type PaletteMode = "smart" | "actions" | "files" | "tabs" | "headings" | "settings" | "workspaces" | "pinned";
+  type PaletteGroupId = "open-tabs" | "pinned-files" | "files" | "headings" | "actions" | "settings" | "workspaces";
+  type PinnedFileRecord = {
+    rootId: string;
+    path: string;
+    pinnedAt: number;
+  };
 
   type WorkspaceEntry = {
     id: string;
@@ -419,6 +424,7 @@
   let readerH3Scale = $state(1.28);
   let readerParagraphSpacing = $state(1.08);
   let readerCodeScale = $state(0.84);
+  let preserveMarkdownWhitespace = $state(true);
 
   // Find inside doc
   let findOpen = $state(false);
@@ -437,9 +443,17 @@
   let openTabRefreshRequestId = 0;
   let paletteRequestId = 0;
   let paletteSearchTimeout = 0;
+  let paletteAutoRefreshTimeout = 0;
+  let paletteAutoRefreshInFlight = false;
+  let paletteAutoRefreshAttemptedQuery = "";
+  let paletteRefreshStatus = $state("");
+  let paletteRefreshStatusTone = $state<"active" | "done" | "error" | "quiet">("quiet");
+  let paletteRefreshStatusTimeout = 0;
   let headingObserver: IntersectionObserver | null = null;
   let readerScrolling = $state(false);
   let readerScrollTimeout = 0;
+  let isRestoringReaderScroll = false;
+  let readerScrollRestoreId = 0;
   let customThemePresets = $state<CustomThemePreset[]>([]);
   let selectedPresetKey = $state("system:paper");
 
@@ -471,6 +485,15 @@
   let effectiveSidebarCollapsed = $derived(sidebarCollapsed || focusMode);
   let shouldShowToc = $derived(Boolean(currentNote && tocItems.length >= 3 && (!tocCollapsed || headingPaletteOpen)));
   let activeTabIndex = $derived(openTabs.findIndex((tab) => tab.id === activeTabId));
+  let pinnedFiles = $state<PinnedFileRecord[]>([]);
+  let activePinnedFiles = $derived.by<FileEntry[]>(() => {
+    const indexedFiles = new Map(files.map((file) => [noteTabId(file.rootId, file.path), file]));
+    return pinnedFiles
+      .filter((pin) => activeWorkspaceRootIds.has(pin.rootId))
+      .sort((a, b) => b.pinnedAt - a.pinnedAt)
+      .map((pin) => indexedFiles.get(noteTabId(pin.rootId, pin.path)))
+      .filter((file): file is FileEntry => Boolean(file));
+  });
   let filteredTocItems = $derived(
     tocQuery.trim()
       ? tocItems.filter((item) => item.text.toLowerCase().includes(tocQuery.trim().toLowerCase()))
@@ -546,6 +569,7 @@
     | { type: "command"; command: CommandItem }
     | { type: "tab"; tab: OpenNoteTab }
     | { type: "file"; file: FileEntry }
+    | { type: "pinned"; file: FileEntry }
     | { type: "heading"; heading: TocItem }
     | { type: "setting"; setting: SettingItem }
     | { type: "workspace"; workspace: WorkspaceEntry };
@@ -564,8 +588,9 @@
     { text: "Next Open Tab", shortcut: ["⌘", "]"], action: () => moveTab(1) },
     { text: "Previous Open Tab", shortcut: ["⌘", "["], action: () => moveTab(-1) },
     { text: "Close Current Tab", shortcut: ["⌘", "W"], action: closeActiveTab },
-    { text: "Close All Open Files", shortcut: [], action: closeAllOpenTabs },
+    { text: "Close All Tabs", shortcut: [], action: closeAllOpenTabs },
     { text: "Search Open Tabs", shortcut: ["⌘", "⇧", "O"], action: () => openPalette("tabs") },
+    { text: "Refresh All Folders", shortcut: [], action: () => void refreshFolders() },
     { text: "Find in Current Note", shortcut: ["⌘", "F"], action: openFind },
     { text: "Open Settings Studio", shortcut: ["⌘", ","], action: () => { settingsOpen = true; settingsSection = "appearance"; } },
     { text: "Restart Onboarding Guide", shortcut: [], action: () => startTour() },
@@ -582,7 +607,7 @@
     { id: "files", title: "Files And Library", section: "files", keywords: ["folders", "workspace", "library"] },
     { id: "appearance", title: "Appearance And Theme Presets", section: "appearance", keywords: ["theme", "font", "reader", "preview"] },
     { id: "toc", title: "Table Of Contents", section: "toc", keywords: ["toc", "headings", "outline"] },
-    { id: "markdown", title: "Markdown Rendering", section: "markdown", keywords: ["html", "code", "render"] },
+    { id: "markdown", title: "Markdown Rendering", section: "markdown", keywords: ["html", "code", "render", "line breaks", "whitespace"] },
     { id: "advanced", title: "Advanced Settings", section: "advanced", keywords: ["debug", "data", "reset"] },
   ];
 
@@ -613,6 +638,9 @@
     const workspaceRows: PaletteSelectableRow[] = workspaces
       .filter((workspace) => matchText(workspace.name, q))
       .map((workspace) => ({ type: "workspace", workspace }));
+    const pinnedRows: PaletteSelectableRow[] = activePinnedFiles
+      .filter((file) => matchText(`${file.title} ${file.rootName} ${file.path}`, q))
+      .map((file) => ({ type: "pinned", file }));
 
     const addGroup = (id: PaletteGroupId, label: string, rows: PaletteSelectableRow[]) => {
       if (rows.length > 0) groups.push({ id, label, rows });
@@ -624,8 +652,10 @@
     else if (mode === "actions") addGroup("actions", "Actions", commandRows);
     else if (mode === "settings") addGroup("settings", "Settings", settingRows);
     else if (mode === "workspaces") addGroup("workspaces", "Workspaces", workspaceRows);
+    else if (mode === "pinned") addGroup("pinned-files", "Pinned Files", pinnedRows);
     else {
       addGroup("open-tabs", "Open Tabs", tabRows.slice(0, 8));
+      addGroup("pinned-files", "Pinned Files", pinnedRows.slice(0, 8));
       addGroup("files", "Files", fileRows.slice(0, 12));
       addGroup("headings", "Headings", headingRows.slice(0, 8));
       addGroup("actions", "Actions", commandRows.slice(0, 8));
@@ -1033,6 +1063,17 @@
     );
   }
 
+  function mergeFilesIntoIndex(nextFiles: FileEntry[]) {
+    if (nextFiles.length === 0) return;
+    const merged = new Map(files.map((file) => [noteTabId(file.rootId, file.path), file]));
+    for (const file of nextFiles) {
+      merged.set(noteTabId(file.rootId, file.path), file);
+    }
+    files = [...merged.values()].sort((a, b) =>
+      a.rootName.localeCompare(b.rootName) || a.path.localeCompare(b.path),
+    );
+  }
+
   function parentFolderLabel(path: string) {
     const parts = path.split("/");
     if (parts.length <= 1) return "Workspace root";
@@ -1144,10 +1185,23 @@
     );
   }
 
+  async function restoreReaderScrollInstant(scrollTop: number) {
+    const restoreId = ++readerScrollRestoreId;
+    isRestoringReaderScroll = true;
+    await tick();
+    const scrollContainer = document.querySelector<HTMLElement>(".reader-scroll");
+    if (scrollContainer) {
+      scrollContainer.scrollTop = scrollTop;
+    }
+    requestAnimationFrame(() => {
+      if (restoreId === readerScrollRestoreId) {
+        isRestoringReaderScroll = false;
+      }
+    });
+  }
+
   function restoreTabScroll(tab: OpenNoteTab) {
-    setTimeout(() => {
-      document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: tab.scrollTop });
-    }, 0);
+    void restoreReaderScrollInstant(tab.scrollTop);
   }
 
   async function scrollActiveTabIntoView() {
@@ -1191,9 +1245,7 @@
       currentNote = note;
       selectedRootId = file.rootId;
       selectedPath = file.path;
-      setTimeout(() => {
-        document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: scrollTop });
-      }, 0);
+      void restoreReaderScrollInstant(scrollTop);
       void scrollActiveTabIntoView();
     }
     saveOpenTabsState();
@@ -1333,8 +1385,7 @@
     const activeTab = openTabs.find((tab) => tab.id === activeId);
     if (activeTab && updates.has(activeTab.id)) {
       currentNote = activeTab.note;
-      await tick();
-      document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: activeScrollTop });
+      await restoreReaderScrollInstant(activeScrollTop);
     }
     saveOpenTabsState();
     showSyncStatus(`Updated ${renderedUpdates.length} open file${renderedUpdates.length === 1 ? "" : "s"}`, "done");
@@ -1370,6 +1421,7 @@
         h3Scale: readerH3Scale,
         paragraphSpacing: readerParagraphSpacing,
         codeScale: readerCodeScale,
+        preserveMarkdownWhitespace,
       }),
     );
   }
@@ -1395,6 +1447,7 @@
       h3Scale?: number;
       paragraphSpacing?: number;
       codeScale?: number;
+      preserveMarkdownWhitespace?: boolean;
     } | null>("minimal-reader:reader-settings", null);
     if (!saved) {
       applyReaderPreset(readerPreset);
@@ -1408,6 +1461,7 @@
     readerH3Scale = saved.h3Scale ?? readerPreset.h3Scale;
     readerParagraphSpacing = saved.paragraphSpacing ?? readerPreset.paragraphSpacing;
     readerCodeScale = saved.codeScale ?? readerPreset.codeScale;
+    preserveMarkdownWhitespace = saved.preserveMarkdownWhitespace ?? true;
   }
 
   async function chooseFolder() {
@@ -1465,6 +1519,8 @@
 
   async function refreshFolders() {
     rootMenu = null;
+    fileMenu = null;
+    workspaceMenu = null;
     error = null;
     showSyncStatus("Refreshing folder list...", "active", true);
     try {
@@ -1476,6 +1532,54 @@
       error = err instanceof Error ? err.message : String(err);
       showSyncStatus("Could not refresh folder list", "error");
     }
+  }
+
+  async function showFileMenuItemInLibrary(file: FileEntry) {
+    fileMenu = null;
+    await revealFileInLibrary(file);
+  }
+
+  function copyFileMenuRelativePath(file: FileEntry) {
+    fileMenu = null;
+    void navigator.clipboard.writeText(fileRelativePath(file));
+  }
+
+  function copyFileMenuFullPath(file: FileEntry) {
+    fileMenu = null;
+    void navigator.clipboard.writeText(fileFullPath(file));
+  }
+
+  function savePinnedFiles(nextPinnedFiles = pinnedFiles) {
+    localStorage.setItem("minimal-reader:pinned-files", JSON.stringify(nextPinnedFiles));
+  }
+
+  function isPinned(rootId: string, path: string) {
+    return pinnedFiles.some((pf) => pf.rootId === rootId && pf.path === path);
+  }
+
+  function pinFile(file: FileEntry) {
+    if (isPinned(file.rootId, file.path)) return;
+    const nextPinnedFiles = [...pinnedFiles, { rootId: file.rootId, path: file.path, pinnedAt: Date.now() }];
+    pinnedFiles = nextPinnedFiles;
+    savePinnedFiles(nextPinnedFiles);
+    fileMenu = null;
+  }
+
+  function unpinFile(file: FileEntry) {
+    const nextPinnedFiles = pinnedFiles.filter((pf) => !(pf.rootId === file.rootId && pf.path === file.path));
+    pinnedFiles = nextPinnedFiles;
+    savePinnedFiles(nextPinnedFiles);
+    fileMenu = null;
+  }
+
+  function copyRootMenuFullPath(root: RootEntry) {
+    rootMenu = null;
+    void navigator.clipboard.writeText(root.path);
+  }
+
+  function copyRootMenuRelativePath(root: RootEntry) {
+    rootMenu = null;
+    void navigator.clipboard.writeText(rootRelativePath(root));
   }
 
   function startSidebarResize(event: PointerEvent) {
@@ -1588,10 +1692,90 @@
     const results = await invoke<FileEntry[]>("search_files", {
       query: searchText,
       limit: 30,
+      activeRootIds: [...activeWorkspaceRootIds],
     });
     if (requestId === paletteRequestId) {
       paletteResults = results;
       paletteActiveIndex = 0;
+      schedulePaletteAutoRefresh(query, results);
+    }
+  }
+
+  function shouldAutoRefreshPaletteQuery(query: string, results: FileEntry[]) {
+    const searchText = normalizeSearchText(stripPalettePrefix(query));
+    const mode = detectPaletteMode(query, paletteMode);
+    return (
+      results.length === 0
+      && searchText.length >= 2
+      && (mode === "smart" || mode === "files")
+    );
+  }
+
+  function schedulePaletteAutoRefresh(query: string, results: FileEntry[]) {
+    window.clearTimeout(paletteAutoRefreshTimeout);
+    if (!shouldAutoRefreshPaletteQuery(query, results)) {
+      if (normalizeSearchText(stripPalettePrefix(query)).length === 0) {
+        paletteAutoRefreshAttemptedQuery = "";
+      }
+      clearPaletteRefreshStatus();
+      return;
+    }
+    if (paletteAutoRefreshInFlight || paletteAutoRefreshAttemptedQuery === query) return;
+    showPaletteRefreshStatus("No result yet. Searching file paths...", "active", true);
+    paletteAutoRefreshTimeout = window.setTimeout(() => {
+      void autoRefreshPaletteQuery(query);
+    }, 420);
+  }
+
+  function showPaletteRefreshStatus(message: string, tone: "active" | "done" | "error" | "quiet" = "quiet", persist = false) {
+    paletteRefreshStatus = message;
+    paletteRefreshStatusTone = tone;
+    window.clearTimeout(paletteRefreshStatusTimeout);
+    if (!persist) {
+      paletteRefreshStatusTimeout = window.setTimeout(() => {
+        clearPaletteRefreshStatus();
+      }, tone === "done" ? 2600 : 3600);
+    }
+  }
+
+  function clearPaletteRefreshStatus() {
+    window.clearTimeout(paletteRefreshStatusTimeout);
+    paletteRefreshStatus = "";
+    paletteRefreshStatusTone = "quiet";
+  }
+
+  async function autoRefreshPaletteQuery(query: string) {
+    const searchText = normalizeSearchText(stripPalettePrefix(query));
+    if (!paletteOpen || paletteQuery !== query || paletteAutoRefreshInFlight || searchText.length < 2) return;
+    paletteAutoRefreshInFlight = true;
+    paletteAutoRefreshAttemptedQuery = query;
+    showPaletteRefreshStatus("Searching nearby file paths...", "active", true);
+    showSyncStatus("Checking for matching files...", "active", true);
+    try {
+      const refreshedResults = await invoke<FileEntry[]>("find_missing_files", {
+        query: searchText,
+        limit: 30,
+        activeRootIds: [...activeWorkspaceRootIds],
+      });
+      if (paletteOpen && paletteQuery === query) {
+        mergeFilesIntoIndex(refreshedResults);
+        paletteResults = refreshedResults;
+        paletteActiveIndex = 0;
+        if (refreshedResults.length > 0) {
+          paletteAutoRefreshAttemptedQuery = "";
+          showPaletteRefreshStatus(`Found ${refreshedResults.length} file${refreshedResults.length === 1 ? "" : "s"}`, "done");
+          showSyncStatus(`Found ${refreshedResults.length} file${refreshedResults.length === 1 ? "" : "s"}`, "done");
+        } else {
+          showPaletteRefreshStatus("No new files found after refresh", "quiet");
+          showSyncStatus("No new files found", "quiet");
+        }
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      showPaletteRefreshStatus("Could not search file paths", "error");
+      showSyncStatus("Could not check for new files", "error");
+    } finally {
+      paletteAutoRefreshInFlight = false;
     }
   }
 
@@ -1684,12 +1868,13 @@
     if (prefix === "#") return "headings";
     if (prefix === "?") return "settings";
     if (prefix === ":") return "workspaces";
+    if (prefix === "!") return "pinned";
     return "smart";
   }
 
   function stripPalettePrefix(query: string) {
     const trimmed = query.trimStart();
-    return /^[>/@#?:]/.test(trimmed) ? trimmed.slice(1).trimStart() : query.trim();
+    return /^[>/@#?!:]/.test(trimmed) ? trimmed.slice(1).trimStart() : query.trim();
   }
 
   function getPalettePrefix(mode: PaletteMode) {
@@ -1699,6 +1884,7 @@
     if (mode === "headings") return "# ";
     if (mode === "settings") return "? ";
     if (mode === "workspaces") return ": ";
+    if (mode === "pinned") return "! ";
     return "";
   }
 
@@ -1709,6 +1895,7 @@
     if (mode === "headings") return "# Jump to heading...";
     if (mode === "settings") return "? Search settings...";
     if (mode === "workspaces") return ": Switch workspace...";
+    if (mode === "pinned") return "! Open pinned file...";
     return "Search files, actions, tabs...";
   }
 
@@ -1730,7 +1917,7 @@
       row.command.action();
     } else if (row.type === "tab") {
       activateTab(row.tab.id);
-    } else if (row.type === "file") {
+    } else if (row.type === "file" || row.type === "pinned") {
       void openNote(row.file);
     } else if (row.type === "heading") {
       jumpToHeading(row.heading.id);
@@ -1830,6 +2017,7 @@
   }
 
   function handleReaderScroll() {
+    if (isRestoringReaderScroll) return;
     readerScrolling = true;
     if (activeTabId) {
       const nextScrollTop = currentReaderScrollTop();
@@ -2307,6 +2495,8 @@
       saveWorkspaces();
     }
 
+    pinnedFiles = safeJson<PinnedFileRecord[]>("minimal-reader:pinned-files", []);
+
     const folders = safeJson<string[]>("minimal-reader:folders", []);
     if (folders.length > 0) {
       roots = rootsFromPaths(folders);
@@ -2524,7 +2714,6 @@
   $effect(() => {
     if (!currentNote) return;
     setTimeout(() => {
-      document.querySelector<HTMLElement>(".reader-scroll")?.scrollTo({ top: 0 });
       clearFindHighlights();
       applyHeadingIds();
       observeHeadings();
@@ -2546,6 +2735,13 @@
       void refreshPaletteResults(query);
     }, 60);
     return () => window.clearTimeout(paletteSearchTimeout);
+  });
+
+  $effect(() => {
+    if (paletteOpen) return;
+    window.clearTimeout(paletteAutoRefreshTimeout);
+    paletteAutoRefreshAttemptedQuery = "";
+    clearPaletteRefreshStatus();
   });
 
   $effect(() => {
@@ -2731,6 +2927,31 @@
         <p class="error">{error}</p>
       {/if}
 
+      {#if activePinnedFiles.length > 0}
+        <div class="pinned-section">
+          <div class="pinned-header">
+            <span class="pinned-label">Pinned Files</span>
+            <small>{activePinnedFiles.length}</small>
+          </div>
+          {#each activePinnedFiles as file}
+            <button
+              class="file-row"
+              class:selected={file.rootId === selectedRootId && file.path === selectedPath}
+              onclick={() => openNote(file)}
+              oncontextmenu={(event) => showFileMenu(event, file)}
+              title={file.path}
+            >
+              <span class="file-title">
+                <span class="row-icon" aria-hidden="true">📍</span>
+                {file.title}
+              </span>
+              <span class="row-meta">{parentFolderLabel(file.path)}</span>
+            </button>
+          {/each}
+          <div class="pinned-divider"></div>
+        </div>
+      {/if}
+
       <nav
         class="file-list"
         aria-label="Markdown files"
@@ -2836,14 +3057,14 @@
       <button onclick={() => { explorerQuery = ""; railMode = "library"; rootMenu = null; }}>
         Show in library
       </button>
-      <button onclick={() => void navigator.clipboard.writeText(rootMenu?.root.path ?? "")}>
+      <button onclick={() => rootMenu && copyRootMenuFullPath(rootMenu.root)}>
         Copy full path
       </button>
-      <button onclick={() => void navigator.clipboard.writeText(rootMenu ? rootRelativePath(rootMenu.root) : "")}>
+      <button onclick={() => rootMenu && copyRootMenuRelativePath(rootMenu.root)}>
         Copy relative path
       </button>
       <button onclick={refreshFolders}>
-        Refresh folder list
+        Refresh all folders
       </button>
       <button class="danger" onclick={() => rootMenu && removeFolder(rootMenu.root)} disabled={isOpening}>
         Remove from Library
@@ -2866,15 +3087,24 @@
         <strong>{fileMenu.file.title}</strong>
         <small>{fileFullPath(fileMenu.file)}</small>
       </div>
-      <button onclick={() => fileMenu && revealFileInLibrary(fileMenu.file)}>
+      <button onclick={() => fileMenu && void showFileMenuItemInLibrary(fileMenu.file)}>
         Show in library
       </button>
-      <button onclick={() => void navigator.clipboard.writeText(fileRelativePath(fileMenu!.file))}>
+      <button onclick={() => fileMenu && copyFileMenuRelativePath(fileMenu.file)}>
         Copy relative path
       </button>
-      <button onclick={() => void navigator.clipboard.writeText(fileMenu ? fileFullPath(fileMenu.file) : "")}>
+      <button onclick={() => fileMenu && copyFileMenuFullPath(fileMenu.file)}>
         Copy full path
       </button>
+      {#if fileMenu && isPinned(fileMenu.file.rootId, fileMenu.file.path)}
+        <button onclick={() => fileMenu && unpinFile(fileMenu.file)}>
+          Unpin file
+        </button>
+      {:else if fileMenu}
+        <button onclick={() => fileMenu && pinFile(fileMenu.file)}>
+          Pin file
+        </button>
+      {/if}
     </div>
   {/if}
 
@@ -2931,6 +3161,9 @@
                 title={`${tab.file.rootName} / ${tab.file.path}`}
               >
                 <span class="tab-index">{index + 1}</span>
+                {#if isPinned(tab.file.rootId, tab.file.path)}
+                  <span class="tab-pin-indicator" aria-label="Pinned"></span>
+                {/if}
                 <span class="tab-title">{tab.note.title}</span>
                 <span
                   class="tab-close"
@@ -3003,7 +3236,7 @@
           Rendering note...
         </div>
       {:else if currentNote}
-        <article class="reader" data-reader style={readerStyle}>
+        <article class="reader" class:preserve-whitespace={preserveMarkdownWhitespace} data-reader style={readerStyle}>
           {@html currentNote.html}
         </article>
       {:else}
@@ -3269,6 +3502,13 @@ reader.apply(preset);</code></pre>
         <div class="settings-section">
           <div class="settings-section-title">Markdown Rendering</div>
           <p class="settings-help">Markdown is rendered to safe HTML by the Rust backend, then displayed in the reader. More block-level rendering settings can be added here.</p>
+          <label class="settings-toggle-row">
+            <span>
+              <strong>Preserve single line breaks</strong>
+              <small>Useful for outline-style files where each line is a separate item or field.</small>
+            </span>
+            <input type="checkbox" bind:checked={preserveMarkdownWhitespace} />
+          </label>
         </div>
       {:else}
         <div class="settings-section">
@@ -3374,8 +3614,21 @@ reader.apply(preset);</code></pre>
       />
       <div class="palette-meta">
         {selectablePaletteRows.length} result{selectablePaletteRows.length === 1 ? "" : "s"}
-        · Prefixes: <kbd>&gt;</kbd> actions <kbd>/</kbd> files <kbd>@</kbd> tabs <kbd>#</kbd> headings <kbd>?</kbd> settings <kbd>:</kbd> workspaces
+        · Prefixes: <kbd>&gt;</kbd> actions <kbd>/</kbd> files <kbd>@</kbd> tabs <kbd>#</kbd> headings <kbd>?</kbd> settings <kbd>:</kbd> workspaces <kbd>!</kbd> pinned
       </div>
+      {#if paletteRefreshStatus}
+        <div
+          class="palette-refresh-status"
+          role="status"
+          aria-live="polite"
+          class:active={paletteRefreshStatusTone === "active"}
+          class:done={paletteRefreshStatusTone === "done"}
+          class:error={paletteRefreshStatusTone === "error"}
+        >
+          <span class="palette-refresh-dot"></span>
+          <span>{paletteRefreshStatus}</span>
+        </div>
+      {/if}
       <div class="palette-results" bind:this={paletteResultsElement}>
         {#each paletteGroups as group (group.id)}
           <div class="palette-group">
@@ -3413,6 +3666,12 @@ reader.apply(preset);</code></pre>
                 {:else if row.type === "file"}
                   <div class="palette-row-copy">
                     <span class="palette-row-type">File</span>
+                    <span class="palette-row-title">{row.file.title}</span>
+                    <small>{row.file.rootName} / {row.file.path}</small>
+                  </div>
+                {:else if row.type === "pinned"}
+                  <div class="palette-row-copy">
+                    <span class="palette-row-type palette-row-type-pinned">Pinned</span>
                     <span class="palette-row-title">{row.file.title}</span>
                     <small>{row.file.rootName} / {row.file.path}</small>
                   </div>
@@ -4206,6 +4465,61 @@ reader.apply(preset);</code></pre>
     color: var(--faint);
   }
 
+  .pinned-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 2px;
+  }
+
+  .pinned-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 10px 4px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .pinned-header small {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    padding: 0 5px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+
+  .pinned-divider {
+    height: 1px;
+    background: var(--line);
+    margin: 4px 10px 6px;
+  }
+
+  .tab-pin-indicator {
+    flex: 0 0 auto;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .palette-row-type-pinned {
+    color: var(--accent-strong) !important;
+    border-color: color-mix(in srgb, var(--accent) 32%, var(--line)) !important;
+    background: color-mix(in srgb, var(--accent-soft) 48%, transparent) !important;
+  }
+
   .file-title,
   .row-meta {
     overflow: hidden;
@@ -4800,6 +5114,14 @@ reader.apply(preset);</code></pre>
   .reader :global(ol),
   .reader :global(blockquote) {
     margin: 0 0 var(--reader-paragraph-spacing);
+  }
+
+  .reader.preserve-whitespace :global(p),
+  .reader.preserve-whitespace :global(li),
+  .reader.preserve-whitespace :global(td),
+  .reader.preserve-whitespace :global(th),
+  .reader.preserve-whitespace :global(blockquote) {
+    white-space: pre-wrap;
   }
 
   .reader :global(ul),
@@ -5596,6 +5918,7 @@ reader.apply(preset);</code></pre>
   }
 
   .settings-root-row,
+  .settings-toggle-row,
   .settings-shortcut-list span {
     display: flex;
     align-items: center;
@@ -5607,6 +5930,28 @@ reader.apply(preset);</code></pre>
     background: var(--panel-strong);
     color: var(--text);
     font-size: 12px;
+  }
+
+  .settings-toggle-row {
+    cursor: pointer;
+  }
+
+  .settings-toggle-row span {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .settings-toggle-row small {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .settings-toggle-row input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
   }
 
   .settings-root-row {
@@ -5771,6 +6116,54 @@ reader.apply(preset);</code></pre>
     background: var(--panel);
     color: var(--text);
     font-size: 10px;
+  }
+
+  .palette-refresh-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--panel) 72%, transparent);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .palette-refresh-status.active {
+    color: color-mix(in srgb, var(--accent) 78%, var(--text));
+  }
+
+  .palette-refresh-status.done {
+    color: color-mix(in srgb, #2f8f5b 72%, var(--text));
+  }
+
+  .palette-refresh-status.error {
+    color: #b84a4a;
+  }
+
+  .palette-refresh-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.78;
+  }
+
+  .palette-refresh-status.active .palette-refresh-dot {
+    animation: palette-refresh-pulse 0.9s ease-in-out infinite;
+  }
+
+  @keyframes palette-refresh-pulse {
+    0%,
+    100% {
+      opacity: 0.38;
+      transform: scale(0.85);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
 
   .palette-results {

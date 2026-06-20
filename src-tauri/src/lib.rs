@@ -3,8 +3,8 @@ use pulldown_cmark::{html, Options, Parser};
 use serde::Serialize;
 use serde_yaml::Value as YamlValue;
 use std::{
-    collections::HashMap,
-    fs,
+    collections::{HashMap, HashSet},
+    env, fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -123,7 +123,9 @@ fn modified_secs(path: &Path) -> i64 {
 }
 
 fn file_size(path: &Path) -> u64 {
-    fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn root_name(path: &Path) -> String {
@@ -181,12 +183,261 @@ fn scan_markdown_files(root: &VaultRoot) -> Vec<FileEntry> {
     files
 }
 
+fn is_ignored_dir_name(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "node_modules" | ".svelte-kit" | "target" | ".tauri" | ".scratch"
+    )
+}
+
+fn keep_walk_entry(entry: &walkdir::DirEntry) -> bool {
+    let name = entry.file_name().to_string_lossy();
+    !is_ignored_dir_name(name.as_ref())
+}
+
+fn path_matches_query(relative_path: &str, query: &str) -> bool {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    let query_tokens = needle
+        .replace(['/', '\\', '-', '_'], " ")
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let normalized_path = relative_path.to_lowercase();
+    let normalized_title = title_from_path(relative_path).to_lowercase();
+    let loose_path = normalized_path
+        .replace(['/', '\\', '-', '_'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized_path.contains(&needle)
+        || normalized_title.contains(&needle)
+        || query_tokens.iter().all(|token| loose_path.contains(token))
+}
+
+fn push_unique(values: &mut Vec<String>, seen: &mut HashSet<String>, value: String) {
+    let value = value.trim().to_string();
+    if !value.is_empty() && seen.insert(value.clone()) {
+        values.push(value);
+    }
+}
+
+fn strip_wrapping_quotes(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let first = trimmed.as_bytes()[0];
+        let last = trimmed.as_bytes()[trimmed.len() - 1];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+fn unescape_shell_path(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.peek().copied() {
+                if next.is_whitespace() || matches!(next, '\\' | '\'' | '"' | '(' | ')' | '[' | ']')
+                {
+                    output.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn expand_home_path(value: &str) -> String {
+    if value == "~" || value.starts_with("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return format!("{}{}", home, &value[1..]);
+        }
+    }
+    value.to_string()
+}
+
+fn cleanup_path_separators(value: &str) -> String {
+    value
+        .split('/')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn path_input_variants(query: &str) -> Vec<String> {
+    let base = strip_wrapping_quotes(query);
+    let mut values = Vec::new();
+    let mut seen = HashSet::new();
+
+    let unescaped = unescape_shell_path(base).replace('\\', "/");
+    push_unique(&mut values, &mut seen, expand_home_path(&unescaped));
+
+    let whitespace_as_space = unescaped.split_whitespace().collect::<Vec<_>>().join(" ");
+    push_unique(
+        &mut values,
+        &mut seen,
+        expand_home_path(&cleanup_path_separators(&whitespace_as_space)),
+    );
+
+    let line_breaks_removed = unescaped.replace(['\r', '\n'], "");
+    push_unique(
+        &mut values,
+        &mut seen,
+        expand_home_path(&cleanup_path_separators(&line_breaks_removed)),
+    );
+
+    let all_whitespace_removed = unescaped.split_whitespace().collect::<String>();
+    push_unique(
+        &mut values,
+        &mut seen,
+        expand_home_path(&cleanup_path_separators(&all_whitespace_removed)),
+    );
+
+    values
+}
+
+fn markdown_path_candidates(path: &str) -> Vec<String> {
+    let mut candidates = vec![path.trim().to_string()];
+    if Path::new(path).extension().is_none() {
+        candidates.push(format!("{path}.md"));
+        candidates.push(format!("{path}.markdown"));
+        candidates.push(format!("{path}.mdx"));
+    }
+    candidates
+}
+
+fn path_candidates_for_root(root: &VaultRoot, query: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for variant in path_input_variants(query) {
+        for candidate in markdown_path_candidates(&variant) {
+            let path = PathBuf::from(&candidate);
+            let full_path = if path.is_absolute() {
+                path
+            } else {
+                root.path.join(candidate.trim_start_matches('/'))
+            };
+            if seen.insert(full_path.clone()) {
+                candidates.push(full_path);
+            }
+
+            if let Some(stripped) = candidate.strip_prefix(&format!("{}/", root.name)) {
+                let root_prefixed_path = root.path.join(stripped);
+                if seen.insert(root_prefixed_path.clone()) {
+                    candidates.push(root_prefixed_path);
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn find_direct_path_match(root: &VaultRoot, query: &str) -> Option<FileEntry> {
+    for candidate in path_candidates_for_root(root, query) {
+        if let Some(entry) = file_entry(&root.path, &candidate) {
+            return Some(FileEntry {
+                root_id: root.id.clone(),
+                root_name: root.name.clone(),
+                ..entry
+            });
+        }
+    }
+    None
+}
+
+fn nearest_existing_search_folder(root: &VaultRoot, path: &Path) -> Option<PathBuf> {
+    let mut current = path.parent()?.to_path_buf();
+    loop {
+        if current.is_dir() {
+            let canonical_folder = current.canonicalize().ok()?;
+            let canonical_root = root.path.canonicalize().ok()?;
+            if canonical_folder.starts_with(&canonical_root) && canonical_folder != canonical_root {
+                return Some(current);
+            }
+            return None;
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn scan_folder_for_path_matches(
+    root: &VaultRoot,
+    folder: &Path,
+    query: &str,
+    limit: usize,
+) -> Vec<FileEntry> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(folder)
+        .max_depth(8)
+        .into_iter()
+        .filter_entry(keep_walk_entry)
+        .flatten()
+    {
+        if files.len() >= limit {
+            break;
+        }
+        let path = entry.path();
+        if !path.is_file() || !is_markdown(path) {
+            continue;
+        }
+        let Some(relative_path) = rel_path(&root.path, path) else {
+            continue;
+        };
+        if !path_matches_query(&relative_path, query) {
+            continue;
+        }
+        if let Some(mut entry) = file_entry(&root.path, path) {
+            entry.root_id = root.id.clone();
+            entry.root_name = root.name.clone();
+            files.push(entry);
+        }
+    }
+    files
+}
+
+fn scan_markdown_files_matching(root: &VaultRoot, query: &str, limit: usize) -> Vec<FileEntry> {
+    if let Some(entry) = find_direct_path_match(root, query) {
+        return vec![entry];
+    }
+    let mut files = Vec::new();
+    let mut scanned_folders = HashSet::new();
+    for candidate in path_candidates_for_root(root, query) {
+        if files.len() >= limit {
+            break;
+        }
+        let Some(folder) = nearest_existing_search_folder(root, &candidate) else {
+            continue;
+        };
+        let folder_key = folder.canonicalize().unwrap_or_else(|_| folder.clone());
+        if !scanned_folders.insert(folder_key) {
+            continue;
+        }
+        let remaining = limit - files.len();
+        files.extend(scan_folder_for_path_matches(
+            root, &folder, query, remaining,
+        ));
+    }
+    files
+}
+
 fn file_entry(root: &Path, path: &Path) -> Option<FileEntry> {
     if !path.is_file() || !is_markdown(path) {
         return None;
     }
     let relative_path = rel_path(root, path)?;
-    let size = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let size = fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     let title = title_from_path(&relative_path);
     let search_key = format!("{} {}", title.to_lowercase(), relative_path.to_lowercase());
     let root_name = root_name(root);
@@ -218,18 +469,27 @@ fn snapshot(state: &VaultState) -> VaultSnapshot {
 
 fn split_frontmatter(markdown: &str) -> (Option<String>, &str) {
     let markdown = markdown.strip_prefix('\u{feff}').unwrap_or(markdown);
-    let Some(rest) = markdown.strip_prefix("---\n").or_else(|| markdown.strip_prefix("---\r\n")) else {
+    let Some(rest) = markdown
+        .strip_prefix("---\n")
+        .or_else(|| markdown.strip_prefix("---\r\n"))
+    else {
         return (None, markdown);
     };
     if let Some(end) = rest.find("\n---\n") {
         let yaml = &rest[..end];
         let body = &rest[end + 5..];
-        return (Some(yaml.to_string()), body.trim_start_matches(['\n', '\r']));
+        return (
+            Some(yaml.to_string()),
+            body.trim_start_matches(['\n', '\r']),
+        );
     }
     if let Some(end) = rest.find("\r\n---\r\n") {
         let yaml = &rest[..end];
         let body = &rest[end + 7..];
-        return (Some(yaml.to_string()), body.trim_start_matches(['\n', '\r']));
+        return (
+            Some(yaml.to_string()),
+            body.trim_start_matches(['\n', '\r']),
+        );
     }
     (None, markdown)
 }
@@ -394,7 +654,12 @@ fn apply_watch_event(app: &AppHandle, state: &AppState, event: Event) -> bool {
             if !is_markdown(&path) {
                 continue;
             }
-            let Some(root) = vault.roots.iter().find(|root| path.starts_with(&root.path)).cloned() else {
+            let Some(root) = vault
+                .roots
+                .iter()
+                .find(|root| path.starts_with(&root.path))
+                .cloned()
+            else {
                 continue;
             };
             let Some(relative_path) = rel_path(&root.path, &path) else {
@@ -413,7 +678,9 @@ fn apply_watch_event(app: &AppHandle, state: &AppState, event: Event) -> bool {
                     vault.files.push(entry);
                 }
             } else {
-                vault.files.retain(|file| !(file.root_id == root.id && file.path == relative_path));
+                vault
+                    .files
+                    .retain(|file| !(file.root_id == root.id && file.path == relative_path));
             }
             state
                 .render_cache
@@ -445,7 +712,11 @@ fn schedule_refresh(app: AppHandle, event: Event) {
 }
 
 #[tauri::command]
-async fn open_vaults(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<VaultSnapshot, String> {
+async fn open_vaults(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<VaultSnapshot, String> {
     let roots = paths
         .into_iter()
         .map(PathBuf::from)
@@ -462,17 +733,24 @@ async fn open_vaults(app: AppHandle, state: State<'_, AppState>, paths: Vec<Stri
 
     let scan_roots = roots.clone();
     let mut files = tauri::async_runtime::spawn_blocking(move || {
-        scan_roots.iter().flat_map(scan_markdown_files).collect::<Vec<_>>()
+        scan_roots
+            .iter()
+            .flat_map(scan_markdown_files)
+            .collect::<Vec<_>>()
     })
-        .await
-        .map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e| e.to_string())?;
     sort_files(&mut files);
     {
         let mut vault = state.vault.lock().expect("vault mutex");
         vault.roots = roots.clone();
         vault.files = files;
     }
-    state.render_cache.lock().expect("render cache mutex").clear();
+    state
+        .render_cache
+        .lock()
+        .expect("render cache mutex")
+        .clear();
 
     rebuild_watcher(app, &roots)?;
 
@@ -481,7 +759,11 @@ async fn open_vaults(app: AppHandle, state: State<'_, AppState>, paths: Vec<Stri
 }
 
 #[tauri::command]
-async fn remove_vault(app: AppHandle, state: State<'_, AppState>, root_id: String) -> Result<VaultSnapshot, String> {
+async fn remove_vault(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    root_id: String,
+) -> Result<VaultSnapshot, String> {
     let roots = {
         let vault = state.vault.lock().expect("vault mutex");
         vault
@@ -497,7 +779,11 @@ async fn remove_vault(app: AppHandle, state: State<'_, AppState>, root_id: Strin
             vault.roots.clear();
             vault.files.clear();
         }
-        state.render_cache.lock().expect("render cache mutex").clear();
+        state
+            .render_cache
+            .lock()
+            .expect("render cache mutex")
+            .clear();
         *state.watcher.lock().expect("watcher mutex") = None;
         let vault = state.vault.lock().expect("vault mutex");
         return Ok(snapshot(&vault));
@@ -506,7 +792,11 @@ async fn remove_vault(app: AppHandle, state: State<'_, AppState>, root_id: Strin
 }
 
 #[tauri::command]
-async fn add_vault(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<VaultSnapshot, String> {
+async fn add_vault(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<VaultSnapshot, String> {
     let mut paths = {
         let vault = state.vault.lock().expect("vault mutex");
         vault
@@ -535,16 +825,27 @@ fn refresh_vault_snapshot(app: AppHandle, state: State<'_, AppState>) -> VaultSn
 }
 
 #[tauri::command]
-fn search_files(state: State<AppState>, query: String, limit: usize) -> Vec<FileEntry> {
+fn search_files(
+    state: State<AppState>,
+    query: String,
+    limit: usize,
+    active_root_ids: Option<Vec<String>>,
+) -> Vec<FileEntry> {
     let needle = query.trim().to_lowercase();
     let limit = limit.clamp(1, 80);
+    let active_root_ids = active_root_ids
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
     let vault = state.vault.lock().expect("vault mutex");
-    if needle.is_empty() {
-        return vault.files.iter().take(limit).cloned().collect();
-    }
-    vault
+    let files = vault
         .files
         .iter()
+        .filter(|file| active_root_ids.is_empty() || active_root_ids.contains(&file.root_id));
+    if needle.is_empty() {
+        return files.take(limit).cloned().collect();
+    }
+    files
         .filter(|file| file.search_key.contains(&needle))
         .take(limit)
         .cloned()
@@ -552,7 +853,93 @@ fn search_files(state: State<AppState>, query: String, limit: usize) -> Vec<File
 }
 
 #[tauri::command]
-async fn render_note(state: State<'_, AppState>, root_id: String, path: String) -> Result<RenderedNote, String> {
+async fn find_missing_files(
+    state: State<'_, AppState>,
+    query: String,
+    limit: usize,
+    active_root_ids: Option<Vec<String>>,
+) -> Result<Vec<FileEntry>, String> {
+    let query = query.trim().to_string();
+    if query.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, 30);
+    let active_root_ids = active_root_ids
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let roots = {
+        let vault = state.vault.lock().expect("vault mutex");
+        vault
+            .roots
+            .iter()
+            .filter(|root| active_root_ids.is_empty() || active_root_ids.contains(&root.id))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query_for_scan = query.clone();
+    let mut found = tauri::async_runtime::spawn_blocking(move || {
+        let mut matches = Vec::new();
+        for root in roots {
+            if matches.len() >= limit {
+                break;
+            }
+            if let Some(entry) = find_direct_path_match(&root, &query_for_scan) {
+                matches.push(entry);
+                continue;
+            }
+            let remaining = limit - matches.len();
+            matches.extend(scan_markdown_files_matching(
+                &root,
+                &query_for_scan,
+                remaining,
+            ));
+        }
+        matches
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let found_keys = found
+        .iter()
+        .map(|file| format!("{}:{}", file.root_id, file.path))
+        .collect::<Vec<_>>();
+
+    {
+        let mut vault = state.vault.lock().expect("vault mutex");
+        for file in &found {
+            if let Some(existing) = vault
+                .files
+                .iter_mut()
+                .find(|candidate| candidate.root_id == file.root_id && candidate.path == file.path)
+            {
+                *existing = file.clone();
+            } else {
+                vault.files.push(file.clone());
+            }
+        }
+        sort_files(&mut vault.files);
+        found = vault
+            .files
+            .iter()
+            .filter(|file| found_keys.contains(&format!("{}:{}", file.root_id, file.path)))
+            .cloned()
+            .collect();
+    }
+
+    Ok(found)
+}
+
+#[tauri::command]
+async fn render_note(
+    state: State<'_, AppState>,
+    root_id: String,
+    path: String,
+) -> Result<RenderedNote, String> {
     let root = {
         let vault = state.vault.lock().expect("vault mutex");
         vault
@@ -566,7 +953,12 @@ async fn render_note(state: State<'_, AppState>, root_id: String, path: String) 
     let modified = modified_secs(&file_path);
     let size = file_size(&file_path);
     let cache_key = format!("{}:{}", root_id, path);
-    if let Some(cached) = state.render_cache.lock().expect("render cache mutex").get(&cache_key) {
+    if let Some(cached) = state
+        .render_cache
+        .lock()
+        .expect("render cache mutex")
+        .get(&cache_key)
+    {
         if cached.modified == modified && cached.size == size {
             return Ok(cached.note.clone());
         }
@@ -597,9 +989,9 @@ async fn render_note(state: State<'_, AppState>, root_id: String, path: String) 
         cache.insert(
             cache_key,
             CachedRendered {
-            modified,
-            size,
-            note: note.clone(),
+                modified,
+                size,
+                note: note.clone(),
             },
         );
     }
@@ -607,7 +999,11 @@ async fn render_note(state: State<'_, AppState>, root_id: String, path: String) 
 }
 
 #[tauri::command]
-async fn open_markdown_file(app: AppHandle, state: State<'_, AppState>, path: String) -> Result<OpenedMarkdown, String> {
+async fn open_markdown_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<OpenedMarkdown, String> {
     let file_path = PathBuf::from(path);
     let canonical_file = file_path.canonicalize().map_err(|e| e.to_string())?;
     if !canonical_file.is_file() || !is_markdown(&canonical_file) {
@@ -623,7 +1019,8 @@ async fn open_markdown_file(app: AppHandle, state: State<'_, AppState>, path: St
         name: root_name(&root_path),
         path: root_path.clone(),
     };
-    let relative_path = rel_path(&root_path, &canonical_file).ok_or("Could not resolve Markdown file path")?;
+    let relative_path =
+        rel_path(&root_path, &canonical_file).ok_or("Could not resolve Markdown file path")?;
     let roots = {
         let vault = state.vault.lock().expect("vault mutex");
         let mut roots = vault.roots.clone();
@@ -634,7 +1031,10 @@ async fn open_markdown_file(app: AppHandle, state: State<'_, AppState>, path: St
     };
     let scan_roots = roots.clone();
     let mut files = tauri::async_runtime::spawn_blocking(move || {
-        scan_roots.iter().flat_map(scan_markdown_files).collect::<Vec<_>>()
+        scan_roots
+            .iter()
+            .flat_map(scan_markdown_files)
+            .collect::<Vec<_>>()
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -644,7 +1044,11 @@ async fn open_markdown_file(app: AppHandle, state: State<'_, AppState>, path: St
         vault.roots = roots.clone();
         vault.files = files;
     }
-    state.render_cache.lock().expect("render cache mutex").clear();
+    state
+        .render_cache
+        .lock()
+        .expect("render cache mutex")
+        .clear();
     rebuild_watcher(app, &roots)?;
 
     let snapshot = {
@@ -673,6 +1077,7 @@ pub fn run() {
             get_vault,
             refresh_vault_snapshot,
             search_files,
+            find_missing_files,
             render_note,
             open_markdown_file
         ])
@@ -771,5 +1176,93 @@ mod tests {
 
         assert!(entry.search_key.contains("project plan"));
         assert!(entry.search_key.contains("project_plan.md"));
+    }
+
+    #[test]
+    fn targeted_scanner_finds_rough_path_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md_path = dir.path().join("daily-notes").join("meeting-plan.md");
+        fs::create_dir_all(md_path.parent().expect("parent")).expect("mkdir");
+        fs::write(&md_path, "# Meeting").expect("write md");
+
+        let root = VaultRoot {
+            id: root_id(dir.path()),
+            name: root_name(dir.path()),
+            path: dir.path().to_path_buf(),
+        };
+        let files = scan_markdown_files_matching(&root, "daily-notes/meeting", 10);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "daily-notes/meeting-plan.md");
+    }
+
+    #[test]
+    fn targeted_scanner_does_not_scan_whole_root_for_plain_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("meeting-plan.md"), "# Meeting").expect("write md");
+
+        let root = VaultRoot {
+            id: root_id(dir.path()),
+            name: root_name(dir.path()),
+            path: dir.path().to_path_buf(),
+        };
+        let files = scan_markdown_files_matching(&root, "meeting", 10);
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn targeted_scanner_cleans_pasted_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md_path = dir.path().join("daily notes").join("meeting plan.md");
+        fs::create_dir_all(md_path.parent().expect("parent")).expect("mkdir");
+        fs::write(&md_path, "# Meeting").expect("write md");
+
+        let root = VaultRoot {
+            id: root_id(dir.path()),
+            name: root_name(dir.path()),
+            path: dir.path().to_path_buf(),
+        };
+        let query = format!("\"{}\"", md_path.to_string_lossy().replace(' ', "\\ "));
+        let files = scan_markdown_files_matching(&root, &query, 10);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "daily notes/meeting plan.md");
+    }
+
+    #[test]
+    fn targeted_scanner_searches_nearest_existing_folder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md_path = dir.path().join("daily-notes").join("meeting-plan.md");
+        fs::create_dir_all(md_path.parent().expect("parent")).expect("mkdir");
+        fs::write(&md_path, "# Meeting").expect("write md");
+
+        let root = VaultRoot {
+            id: root_id(dir.path()),
+            name: root_name(dir.path()),
+            path: dir.path().to_path_buf(),
+        };
+        let files = scan_markdown_files_matching(&root, "daily-notes/meeting plan", 10);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "daily-notes/meeting-plan.md");
+    }
+
+    #[test]
+    fn targeted_scanner_respects_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let notes = dir.path().join("notes");
+        fs::create_dir_all(&notes).expect("mkdir");
+        fs::write(notes.join("alpha-one.md"), "# One").expect("write first");
+        fs::write(notes.join("alpha-two.md"), "# Two").expect("write second");
+
+        let root = VaultRoot {
+            id: root_id(dir.path()),
+            name: root_name(dir.path()),
+            path: dir.path().to_path_buf(),
+        };
+        let files = scan_markdown_files_matching(&root, "notes/alpha", 1);
+
+        assert_eq!(files.len(), 1);
     }
 }
